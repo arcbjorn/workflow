@@ -67,7 +67,7 @@ type RepoOverride struct {
 
 func Default() Config {
     return Config{
-        Roots:  []string{"~/projects"},
+        Roots:  []string{"~/projects", "~/tools"},
         Depth:  2,
         Ignore: "auto",
         Editor: Editors{
