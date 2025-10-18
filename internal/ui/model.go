@@ -109,7 +109,8 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
     lst.SetFilteringEnabled(false)
     // Themed list styles
     s := lst.Styles
-    s.Title = s.Title.Foreground(lipgloss.Color(accentHex))
+    // Override Title to avoid default background
+    s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
     s.FilterCursor = s.FilterCursor.Foreground(lipgloss.Color(accentHex))
     s.FilterPrompt = s.FilterPrompt.Foreground(lipgloss.Color(accentHex))
     lst.Styles = s
