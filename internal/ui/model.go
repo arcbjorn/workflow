@@ -52,6 +52,7 @@ type Model struct {
     showDetail bool
     detail     viewport.Model
     mdEnabled bool
+    mdCache   map[string]string
 
     // Sorting
     sortKey string // last|ab|branch
@@ -77,6 +78,7 @@ type Model struct {
     lastScanDur time.Duration
     lastRepoCnt int
     lastRootsCnt int
+
 }
 
 func NewModel(cfg config.Config, th theme.Theme) Model {
@@ -110,6 +112,7 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         sortAsc:     false,
         grouped:     false,
         expanded:    map[string]bool{},
+        mdCache:     make(map[string]string),
     }
     // Spinner init
     sp := spinner.New()
@@ -148,8 +151,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     case tea.WindowSizeMsg:
         m.width = msg.Width
         m.height = msg.Height
-        m.updateTableHeight()
         m.updateTableHeader()
+        m.updateTableHeight()
         // Resize agents list as overlay
         m.agents.SetSize(min(60, m.width-4), min(12, m.height-6))
         if m.showTasks {
@@ -189,16 +192,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         // Apply some minimal section styling on the first lines
         // First line is name, second path; then sections 'Recent commits' and 'README'
         if m.mdEnabled {
-            // Render README (if present) in Markdown
+            // Render README (if present) in Markdown (theme-aware)
             content, ok := scanner.ReadmeContent(m.currentPath(), 1<<20)
             if ok {
-                style := "dark"
-                if !m.th.Dark { style = "light" }
                 r, _ := glamour.NewTermRenderer(
                     glamour.WithAutoStyle(),
                     glamour.WithWordWrap(m.detail.Width),
-                    glamour.WithEnvironmentConfig(),
-                    glamour.WithStylePath(style),
                 )
                 if out, err := r.Render(content); err == nil {
                     m.detail.SetContent(out)
@@ -223,6 +222,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             switch msg.String() {
             case "esc", "q":
                 m.showTasks = false
+                m.updateTableHeight()
                 return m, nil
             case "enter":
                 idx := m.taskItems.Index()
@@ -247,6 +247,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             switch msg.String() {
             case "q", "esc", "enter":
                 m.showDetail = false
+                m.updateTableHeight()
                 return m, nil
             case "M":
                 // Toggle Markdown rendering for README while in details
@@ -257,6 +258,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 ri := m.visible[idx]
                 if ri < 0 || ri >= len(m.repos) { return m, nil }
                 return m, loadDetailCmd(m.repos[ri])
+            case "j":
+                m.detail.ScrollDown(1)
+                return m, nil
+            case "k":
+                m.detail.ScrollUp(1)
+                return m, nil
+            case "g":
+                m.detail.GotoTop()
+                return m, nil
+            case "G":
+                m.detail.GotoBottom()
+                return m, nil
             }
             var cmd tea.Cmd
             m.detail, cmd = m.detail.Update(msg)
@@ -267,6 +280,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             case "esc", "q":
                 m.showAgents = false
                 m.status = ""
+                m.updateTableHeight()
                 return m, nil
             case "enter":
                 if it, ok := m.agents.SelectedItem().(agentItem); ok {
@@ -356,18 +370,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             if ri < 0 || ri >= len(m.repos) { return m, nil }
             m.showDetail = true
             m.status = ""
+            m.updateTableHeight()
             return m, loadDetailCmd(m.repos[ri])
         case "M":
             // Toggle markdown rendering of README in details
             m.mdEnabled = !m.mdEnabled
             if m.showDetail {
-                // retrigger detail load
+                // Synchronous re-render of detail content
                 if len(m.visible) == 0 { return m, nil }
                 idx := m.table.Cursor()
                 if idx < 0 || idx >= len(m.visible) { return m, nil }
                 ri := m.visible[idx]
                 if ri < 0 || ri >= len(m.repos) { return m, nil }
-                return m, loadDetailCmd(m.repos[ri])
+                m.renderDetailNow(m.repos[ri])
+                return m, nil
             }
             return m, nil
         case "/":
@@ -546,33 +562,35 @@ func (m Model) View() string {
         fmt.Fprintln(&b, m.table.View())
     }
 
-    if m.filtering {
-        fmt.Fprintln(&b)
-        fmt.Fprint(&b, "/ ")
-        fmt.Fprintln(&b, m.input.View())
-    }
+    overlayOpen := m.showAgents || m.showTasks || m.showDetail
+    if !overlayOpen {
+        if m.filtering {
+            fmt.Fprintln(&b)
+            fmt.Fprint(&b, "/ ")
+            fmt.Fprintln(&b, m.input.View())
+        }
 
-    if m.status != "" {
-        fmt.Fprintln(&b)
-        if m.scanning {
-            line := m.spin.View() + " " + m.status
-            fmt.Fprintln(&b, statusStyle.Render(line))
-        } else {
-            fmt.Fprintln(&b, statusStyle.Render(m.status))
+        if m.status != "" {
+            fmt.Fprintln(&b)
+            if m.scanning {
+                line := m.spin.View() + " " + m.status
+                fmt.Fprintln(&b, statusStyle.Render(line))
+            } else {
+                fmt.Fprintln(&b, statusStyle.Render(m.status))
+            }
+        }
+
+        // compact stats bar
+        if m.reposLoaded {
+            fmt.Fprintln(&b)
+            dur := m.lastScanDur
+            durStr := fmt.Sprintf("%dms", dur.Milliseconds())
+            if dur.Seconds() >= 1 { durStr = fmt.Sprintf("%.1fs", dur.Seconds()) }
+            stats := fmt.Sprintf("Roots: %d  Repos: %d  Scan: %s", m.lastRootsCnt, m.lastRepoCnt, durStr)
+            fmt.Fprintln(&b, statusStyle.Render(stats))
         }
     }
 
-    // compact stats bar
-    if m.reposLoaded {
-        fmt.Fprintln(&b)
-        dur := m.lastScanDur
-        durStr := fmt.Sprintf("%dms", dur.Milliseconds())
-        if dur.Seconds() >= 1 { durStr = fmt.Sprintf("%.1fs", dur.Seconds()) }
-        stats := fmt.Sprintf("Roots: %d  Repos: %d  Scan: %s", m.lastRootsCnt, m.lastRepoCnt, durStr)
-        fmt.Fprintln(&b, statusStyle.Render(stats))
-    }
-
-    overlayOpen := m.showAgents || m.showTasks || m.showDetail
     if m.showHelp && !overlayOpen {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  m group  x expand  ? help  q quit")
@@ -1022,51 +1040,77 @@ func min(a, b int) int { if a<b { return a }; return b }
 func loadDetailCmd(r scanner.RepoEntry) tea.Cmd {
     return func() tea.Msg {
         // Build detail content lazily (plain text; styling applied in View)
-        var sb strings.Builder
-        fmt.Fprintln(&sb, r.Name)
-        fmt.Fprintf(&sb, "%s\n", r.Path)
-        fmt.Fprintf(&sb, "Branch: %s\n", r.Branch)
-        fmt.Fprintf(&sb, "Ahead/Behind: %d/%d\n", r.Ahead, r.Behind)
-        fmt.Fprintf(&sb, "Dirty: %v  Conflicts: %d\n", r.Dirty, r.Conflicts)
-        fmt.Fprintf(&sb, "Last: %s\n", r.LastAge)
-        // Tasks preview
-        fmt.Fprintln(&sb)
-        fmt.Fprintln(&sb, "Tasks (press r to run)")
-        ts := tasks.Detect(r.Path)
-        if len(ts) == 0 {
-            fmt.Fprintln(&sb, "(none)")
-        } else {
-            max := 8
-            if len(ts) < max { max = len(ts) }
-            for i := 0; i < max; i++ {
-                fmt.Fprintf(&sb, "• %s — %s\n", ts[i].Name, ts[i].Cmd)
-            }
-            if len(ts) > max {
-                fmt.Fprintf(&sb, "… and %d more\n", len(ts)-max)
-            }
-        }
-        // Recent commits
-        fmt.Fprintln(&sb)
-        fmt.Fprintln(&sb, "Recent commits")
-        commits := scanner.RecentCommits(r.Path, 8)
-        if len(commits) == 0 {
-            fmt.Fprintln(&sb, "No commits")
-        } else {
-            for _, c := range commits {
-                fmt.Fprintln(&sb, c)
-            }
-        }
-        // README snippet
-        fmt.Fprintln(&sb)
-        fmt.Fprintln(&sb, "README")
-        readme := scanner.ReadmeSnippet(r.Path, 24)
-        if len(readme) == 0 {
-            fmt.Fprintln(&sb, "(none)")
-        } else {
-            for _, ln := range readme { fmt.Fprintln(&sb, ln) }
-        }
-        return detailMsg{Text: sb.String()}
+        return detailMsg{Text: buildDetailPlainText(r)}
     }
+}
+
+func buildDetailPlainText(r scanner.RepoEntry) string {
+    var sb strings.Builder
+    fmt.Fprintln(&sb, r.Name)
+    fmt.Fprintf(&sb, "%s\n", r.Path)
+    fmt.Fprintf(&sb, "Branch: %s\n", r.Branch)
+    fmt.Fprintf(&sb, "Ahead/Behind: %d/%d\n", r.Ahead, r.Behind)
+    fmt.Fprintf(&sb, "Dirty: %v  Conflicts: %d\n", r.Dirty, r.Conflicts)
+    fmt.Fprintf(&sb, "Last: %s\n", r.LastAge)
+    // Tasks preview
+    fmt.Fprintln(&sb)
+    fmt.Fprintln(&sb, "Tasks (press r to run)")
+    ts := tasks.Detect(r.Path)
+    if len(ts) == 0 {
+        fmt.Fprintln(&sb, "(none)")
+    } else {
+        max := 8
+        if len(ts) < max { max = len(ts) }
+        for i := 0; i < max; i++ {
+            fmt.Fprintf(&sb, "• %s — %s\n", ts[i].Name, ts[i].Cmd)
+        }
+        if len(ts) > max {
+            fmt.Fprintf(&sb, "… and %d more\n", len(ts)-max)
+        }
+    }
+    // Recent commits
+    fmt.Fprintln(&sb)
+    fmt.Fprintln(&sb, "Recent commits")
+    commits := scanner.RecentCommits(r.Path, 8)
+    if len(commits) == 0 {
+        fmt.Fprintln(&sb, "No commits")
+    } else {
+        for _, c := range commits {
+            fmt.Fprintln(&sb, c)
+        }
+    }
+    // README snippet
+    fmt.Fprintln(&sb)
+    fmt.Fprintln(&sb, "README")
+    readme := scanner.ReadmeSnippet(r.Path, 24)
+    if len(readme) == 0 {
+        fmt.Fprintln(&sb, "(none)")
+    } else {
+        for _, ln := range readme { fmt.Fprintln(&sb, ln) }
+    }
+    return sb.String()
+}
+
+func (m *Model) renderDetailNow(r scanner.RepoEntry) {
+    if m.mdEnabled {
+        key := fmt.Sprintf("%s#W%d#%t", r.Path, m.detail.Width, m.th.Dark)
+        if cached, ok := m.mdCache[key]; ok && cached != "" {
+            m.detail.SetContent(cached)
+            m.detail.GotoTop()
+            return
+        }
+        if content, ok := scanner.ReadmeContent(r.Path, 64*1024); ok { // limit for speed
+            rmd, _ := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(m.detail.Width))
+            if out, err := rmd.Render(content); err == nil {
+                m.mdCache[key] = out
+                m.detail.SetContent(out)
+                m.detail.GotoTop()
+                return
+            }
+        }
+    }
+    m.detail.SetContent(buildDetailPlainText(r))
+    m.detail.GotoTop()
 }
 
 // updateTableHeight computes table height so the overall view fits in the window.
@@ -1076,30 +1120,48 @@ func (m *Model) updateTableHeight() {
     overhead += 2
     // Filter input
     if m.filtering { overhead += 2 }
-    overlayOpen := m.showAgents || m.showTasks || m.showDetail
     // Status line
-    if m.status != "" && !overlayOpen { overhead += 2 }
-    // Stats bar (shown when reposLoaded)
-    if m.reposLoaded && !overlayOpen { overhead += 2 }
-    // Help + legend (approx)
-    if m.showHelp && !overlayOpen { overhead += 5 }
-    // Overlays
+    if m.status != "" { overhead += 2 }
+    // Stats bar
+    if m.reposLoaded { overhead += 2 }
+    // Help + legend
+    if m.showHelp { overhead += 5 }
+
+    contentH := m.height - overhead
+    if contentH < 6 { contentH = 6 }
+
     if m.showAgents {
-        h := m.agents.Height()
-        if h <= 0 { h = 10 }
-        overhead += 1 + h
+        // Agents overlay replaces content area; keep table height reasonable beneath
+        ov := m.agents.Height()
+        if ov <= 0 { ov = 10 }
+        // reserve one blank line before overlay
+        tableH := contentH - (1 + ov)
+        if tableH < 3 { tableH = 3 }
+        m.table.SetHeight(tableH)
+        return
     }
     if m.showTasks {
-        h := m.taskItems.Height()
-        if h <= 0 { h = 12 }
-        overhead += 1 + h
+        ov := m.taskItems.Height()
+        if ov <= 0 { ov = 12 }
+        tableH := contentH - (1 + ov)
+        if tableH < 3 { tableH = 3 }
+        m.table.SetHeight(tableH)
+        return
     }
     if m.showDetail {
-        h := m.detail.Height
-        if h <= 0 { h = 12 }
-        overhead += 1 + h
+        // Allocate ~40% of the content to details with bounds
+        detailH := int(float64(contentH) * 0.4)
+        if detailH < 8 { detailH = 8 }
+        if detailH > 24 { detailH = 24 }
+        tableH := contentH - (1 + detailH) // one blank line spacing
+        if tableH < 3 { tableH = 3 }
+        m.detail.Height = detailH
+        m.table.SetHeight(tableH)
+        return
     }
-    h := m.height - overhead
-    if h < 3 { h = 3 }
-    m.table.SetHeight(h)
+    // Default: table fills content area
+    m.table.SetHeight(contentH)
 }
+
+// computeLayout selects a responsive layout and sizes panes.
+// computeLayout removed; single-column layout with responsive heights
