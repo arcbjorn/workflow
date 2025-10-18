@@ -432,6 +432,9 @@ func (m Model) View() string {
     if m.filter != "" {
         title += fmt.Sprintf("  [/%s]", m.filter)
     }
+    // indicators
+    if m.grouped { title += "  [grouped]" }
+    title += fmt.Sprintf("  [sort:%s%s]", m.sortKey, map[bool]string{true:"↑", false:"↓"}[m.sortAsc])
     fmt.Fprintln(&b, titleStyle.Render(title))
     // separator styled with a subtle theme foreground
     sep := strings.Repeat("─", max(10, m.width))
