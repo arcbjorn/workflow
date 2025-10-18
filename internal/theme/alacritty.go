@@ -20,31 +20,7 @@ type Palette struct {
 // the merge order is: imported files first, then the importer overlays them.
 func loadFromAlacritty() (Palette, bool) {
     var pal Palette
-    // resolve config home
-    base := os.Getenv("XDG_CONFIG_HOME")
-    if base == "" {
-        home, err := os.UserHomeDir(); if err != nil { return pal, false }
-        base = filepath.Join(home, ".config")
-    }
-    dir := filepath.Join(base, "alacritty")
-    // candidates in order
-    candidates := []string{
-        filepath.Join(dir, "alacritty.toml"),
-        filepath.Join(dir, "alacritty.yml"),
-        filepath.Join(dir, "alacritty.yaml"),
-    }
-    for _, path := range candidates {
-        if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
-            merged := parseAlacrittyWithImports(path, map[string]struct{}{})
-            if merged != nil {
-                pal = extractPalette(merged)
-                // success if any colors found
-                if pal.PrimaryBackground != "" || pal.PrimaryForeground != "" || len(pal.Normal) > 0 || len(pal.Bright) > 0 {
-                    return pal, true
-                }
-            }
-        }
-    }
+    // Deprecated: we're using Omarchy as source of truth. Keep returning false.
     return pal, false
 }
 
