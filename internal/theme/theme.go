@@ -10,15 +10,28 @@ import (
 type Theme struct {
     Mode string // auto|dark|light|custom (resolved)
     Dark bool
+    Colors Palette
 }
 
 // Detect attempts to resolve a dark/light theme from config and environment.
 // MVP: honors explicit config; then tries pywal cache; otherwise dark.
 func Detect(mode string) Theme {
     t := Theme{Mode: mode, Dark: true}
+    // First: explicit overrides
     if mode == "dark" { t.Dark = true; return t }
     if mode == "light" { t.Dark = false; return t }
-    // auto/custom → try pywal; later, add Alacritty parsing
+    // Auto: try Alacritty config colors
+    if pal, ok := loadFromAlacritty(); ok {
+        t.Colors = pal
+        // determine dark/light from background luminance
+        r, g, b, okc := hexToRGB(pal.PrimaryBackground)
+        if okc {
+            l := 0.2126*float64(r)/255 + 0.7152*float64(g)/255 + 0.0722*float64(b)/255
+            t.Dark = l < 0.5
+        }
+        return t
+    }
+    // Next: pywal
     if isDarkFromPywal() {
         t.Dark = true
         return t
