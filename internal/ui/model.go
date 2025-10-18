@@ -68,6 +68,12 @@ type Model struct {
 
     // Spinner for scanning
     spin spinner.Model
+
+    // Last scan stats
+    scanStart   time.Time
+    lastScanDur time.Duration
+    lastRepoCnt int
+    lastRootsCnt int
 }
 
 func NewModel(cfg config.Config, th theme.Theme) Model {
@@ -139,12 +145,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     case tea.WindowSizeMsg:
         m.width = msg.Width
         m.height = msg.Height
-        h := m.height - 6
-        if h < 5 { h = 5 }
-        m.table.SetHeight(h)
+        m.updateTableHeight()
         m.updateTableHeader()
         // Resize agents list as overlay
         m.agents.SetSize(min(60, m.width-4), min(12, m.height-6))
+        if m.showTasks {
+            m.taskItems.SetSize(min(60, m.width-4), min(12, m.height-6))
+        }
         m.detail.Width = min(m.width-6, 100)
         m.detail.Height = min(m.height-8, 20)
         return m, nil
@@ -154,11 +161,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.repos = orderRepos(msg.Entries, m.sortKey, m.sortAsc)
         m.refreshRows()
         m.scanning = false
+        m.status = ""
+        if !m.scanStart.IsZero() { m.lastScanDur = time.Since(m.scanStart) }
+        m.lastRepoCnt = len(m.repos)
+        m.lastRootsCnt = len(m.cfg.Roots)
         return m, nil
     case startScanMsg:
         if m.scanning { return m, nil }
         m.scanning = true
         m.status = "scanning…"
+        m.scanStart = time.Now()
         return m, tea.Batch(scanCmd(m.cfg), m.spin.Tick)
     case themeTickMsg:
         // If theme changed, reapply palette
@@ -262,7 +274,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.input, cmd = m.input.Update(msg)
             return m, cmd
         }
-        switch msg.String() {
+        k := msg.String()
+        // Map configured keys to internal defaults for switch handling
+        k = m.mapKey(k)
+        switch k {
         case "ctrl+c", "q":
             return m, tea.Quit
         case "?":
@@ -481,6 +496,16 @@ func (m Model) View() string {
         }
     }
 
+    // compact stats bar
+    if m.reposLoaded {
+        fmt.Fprintln(&b)
+        dur := m.lastScanDur
+        durStr := fmt.Sprintf("%dms", dur.Milliseconds())
+        if dur.Seconds() >= 1 { durStr = fmt.Sprintf("%.1fs", dur.Seconds()) }
+        stats := fmt.Sprintf("Roots: %d  Repos: %d  Scan: %s", m.lastRootsCnt, m.lastRepoCnt, durStr)
+        fmt.Fprintln(&b, statusStyle.Render(stats))
+    }
+
     if m.showHelp {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  m group  x expand  ? help  q quit")
@@ -618,6 +643,8 @@ func ageScore(a string) time.Duration {
 func (m *Model) refreshRows() {
     rows := []table.Row{}
     m.visible = m.visible[:0]
+    sel := m.table.Cursor()
+    rowNo := 0
     if !m.grouped {
         for i, r := range m.repos {
             // per-repo hide override
@@ -629,12 +656,14 @@ func (m *Model) refreshRows() {
                 }
             }
             dirty := ""
-            if r.Dirty { dirty = colorBadge("*", m.th, "yellow") }
+            isSel := rowNo == sel
+            if r.Dirty && !isSel { dirty = colorBadge("*", m.th, "yellow") }
             ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
             state := bucket(r.LastAge)
-            name := m.renderName(r, "")
+            name := m.renderNameSelected(r, "", isSel)
             rows = append(rows, table.Row{name, state, r.Branch, dirty, ab, r.LastAge})
             m.visible = append(m.visible, i)
+            rowNo++
         }
     } else {
         // Build child index and set for quick lookup
@@ -657,12 +686,14 @@ func (m *Model) refreshRows() {
                 }
             }
             dirty := ""
-            if r.Dirty { dirty = colorBadge("*", m.th, "yellow") }
+            isSel := rowNo == sel
+            if r.Dirty && !isSel { dirty = colorBadge("*", m.th, "yellow") }
             ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
             state := bucket(r.LastAge)
-            name := m.renderName(r, indent)
+            name := m.renderNameSelected(r, indent, isSel)
             rows = append(rows, table.Row{name, state, r.Branch, dirty, ab, r.LastAge})
             m.visible = append(m.visible, i)
+            rowNo++
         }
         for i, r := range m.repos {
             if m.isHidden(r.Path) { continue }
@@ -686,9 +717,10 @@ func (m *Model) refreshRows() {
         }
     }
     m.table.SetRows(rows)
+    m.updateTableHeight()
 }
 
-func (m *Model) renderName(r scanner.RepoEntry, indent string) string {
+func (m *Model) renderNameSelected(r scanner.RepoEntry, indent string, selected bool) string {
     // determine base display name
     base := r.Name
     if r.WorkspacePkg && r.PackageName != "" { base = r.PackageName }
@@ -696,13 +728,24 @@ func (m *Model) renderName(r scanner.RepoEntry, indent string) string {
     if name := m.overrideName(r.Path); name != "" { base = name }
     // colorized badges
     var parts []string
-    if r.Dirty { parts = append(parts, colorBadge("*", m.th, "yellow")) }
-    if r.Conflicts > 0 { parts = append(parts, colorBadge("‼", m.th, "red")) }
-    if r.Ahead > 0 { parts = append(parts, colorBadge("⇡", m.th, "green")) }
-    if r.Behind > 0 { parts = append(parts, colorBadge("⇣", m.th, "magenta")) }
-    if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { parts = append(parts, colorBadge("det", m.th, "cyan")) }
-    if r.Monorepo { parts = append(parts, colorBadge("mono", m.th, "blue")) }
-    if r.WorkspacePkg { parts = append(parts, colorBadge("pkg", m.th, "blue")) }
+    if !selected {
+        if r.Dirty { parts = append(parts, colorBadge("*", m.th, "yellow")) }
+        if r.Conflicts > 0 { parts = append(parts, colorBadge("‼", m.th, "red")) }
+        if r.Ahead > 0 { parts = append(parts, colorBadge("⇡", m.th, "green")) }
+        if r.Behind > 0 { parts = append(parts, colorBadge("⇣", m.th, "magenta")) }
+        if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { parts = append(parts, colorBadge("det", m.th, "cyan")) }
+        if r.Monorepo { parts = append(parts, colorBadge("mono", m.th, "blue")) }
+        if r.WorkspacePkg { parts = append(parts, colorBadge("pkg", m.th, "blue")) }
+    } else {
+        // Plain badges on selected rows to avoid breaking highlight
+        if r.Dirty { parts = append(parts, "*") }
+        if r.Conflicts > 0 { parts = append(parts, "‼") }
+        if r.Ahead > 0 { parts = append(parts, "⇡") }
+        if r.Behind > 0 { parts = append(parts, "⇣") }
+        if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { parts = append(parts, "det") }
+        if r.Monorepo { parts = append(parts, "mono") }
+        if r.WorkspacePkg { parts = append(parts, "pkg") }
+    }
     if len(parts) > 0 {
         return indent + fmt.Sprintf("%s [%s]", base, strings.Join(parts, ""))
     }
@@ -736,6 +779,18 @@ func (m *Model) isHidden(path string) bool {
         }
     }
     return false
+}
+
+// mapKey maps a pressed key to the internal default binding if configured.
+func (m *Model) mapKey(s string) string {
+    if s == m.cfg.Keys.Group && s != "" { return "m" }
+    if s == m.cfg.Keys.Expand && s != "" { return "x" }
+    if s == m.cfg.Keys.Refresh && s != "" { return "R" }
+    if s == m.cfg.Keys.Sort && s != "" { return "s" }
+    if s == m.cfg.Keys.SortReverse && s != "" { return "S" }
+    if s == m.cfg.Keys.Details && s != "" { return "enter" }
+    if s == m.cfg.Keys.Tasks && s != "" { return "r" }
+    return s
 }
 
 func (m *Model) overrideName(path string) string {
@@ -908,6 +963,8 @@ func (m *Model) updateTableHeader() {
         {Title: "Last" + arrow(m.sortKey=="last"), Width: wLast},
     }
     m.table.SetColumns(cols)
+    // ensure table width aligns with terminal width for consistent columns
+    m.table.SetWidth(m.width)
 }
 
 func min(a, b int) int { if a<b { return a }; return b }
@@ -960,4 +1017,38 @@ func loadDetailCmd(r scanner.RepoEntry) tea.Cmd {
         }
         return detailMsg{Text: sb.String()}
     }
+}
+
+// updateTableHeight computes table height so the overall view fits in the window.
+func (m *Model) updateTableHeight() {
+    overhead := 0
+    // Title + separator
+    overhead += 2
+    // Filter input
+    if m.filtering { overhead += 2 }
+    // Status line
+    if m.status != "" { overhead += 2 }
+    // Stats bar (shown when reposLoaded)
+    if m.reposLoaded { overhead += 2 }
+    // Help + legend (approx)
+    if m.showHelp { overhead += 5 }
+    // Overlays
+    if m.showAgents {
+        h := m.agents.Height()
+        if h <= 0 { h = 10 }
+        overhead += 1 + h
+    }
+    if m.showTasks {
+        h := m.taskItems.Height()
+        if h <= 0 { h = 12 }
+        overhead += 1 + h
+    }
+    if m.showDetail {
+        h := m.detail.Height
+        if h <= 0 { h = 12 }
+        overhead += 1 + h
+    }
+    h := m.height - overhead
+    if h < 3 { h = 3 }
+    m.table.SetHeight(h)
 }
