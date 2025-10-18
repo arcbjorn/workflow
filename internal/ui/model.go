@@ -11,6 +11,7 @@ import (
     "github.com/charmbracelet/bubbles/table"
     "github.com/charmbracelet/bubbles/textinput"
     "github.com/charmbracelet/bubbles/list"
+    "github.com/charmbracelet/bubbles/viewport"
     "github.com/charmbracelet/lipgloss"
     "workflow/internal/config"
     "workflow/internal/run"
@@ -42,6 +43,9 @@ type Model struct {
     filtering bool
     showAgents bool
     agents     list.Model
+    // Detail overlay
+    showDetail bool
+    detail     viewport.Model
 }
 
 func NewModel(cfg config.Config, th theme.Theme) Model {
@@ -80,7 +84,8 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
     accHex := pickAccent(th.Colors, th.Dark)
     st.Cell = st.Cell.Foreground(lipgloss.Color(fgHex))
     st.Header = st.Header.Foreground(lipgloss.Color(accHex)).Bold(true)
-    st.Selected = st.Selected.Foreground(lipgloss.Color(pickBG(th.Colors, th.Dark))).Background(lipgloss.Color(accHex))
+    selText := bestTextFor(accHex, fgHex, pickBG(th.Colors, th.Dark))
+    st.Selected = st.Selected.Foreground(lipgloss.Color(selText)).Background(lipgloss.Color(accHex))
     m.table.SetStyles(st)
     // Agents list setup
     items := m.agentItems()
@@ -90,10 +95,15 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
     accentHex := pickAccent(m.th.Colors, m.th.Dark)
     d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(lipgloss.Color(fgList))
     d.Styles.NormalDesc = d.Styles.NormalDesc.Foreground(lipgloss.Color(fgList))
+    // Selected item: accent background with best-contrast text
+    lstSelText := bestTextFor(accentHex, fgList, pickBG(m.th.Colors, m.th.Dark))
     d.Styles.SelectedTitle = d.Styles.SelectedTitle.
-        Foreground(lipgloss.Color(accentHex)).
+        Foreground(lipgloss.Color(lstSelText)).
+        Background(lipgloss.Color(accentHex)).
         BorderForeground(lipgloss.Color(accentHex))
-    d.Styles.SelectedDesc = d.Styles.SelectedDesc.Foreground(lipgloss.Color(accentHex))
+    d.Styles.SelectedDesc = d.Styles.SelectedDesc.
+        Foreground(lipgloss.Color(lstSelText)).
+        Background(lipgloss.Color(accentHex))
     lst := list.New(items, d, 40, 10)
     lst.Title = "Choose agent"
     lst.SetShowStatusBar(false)
@@ -101,13 +111,31 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
     // Themed list styles
     s := lst.Styles
     // Themed list UI
+    s.TitleBar = lipgloss.NewStyle() // keep clean background
     s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
+    s.Spinner = s.Spinner.Foreground(lipgloss.Color(accentHex))
     s.FilterCursor = s.FilterCursor.Foreground(lipgloss.Color(accentHex))
     s.FilterPrompt = s.FilterPrompt.Foreground(lipgloss.Color(accentHex))
+    s.DefaultFilterCharacterMatch = s.DefaultFilterCharacterMatch.Foreground(lipgloss.Color(accentHex))
+    s.StatusBar = s.StatusBar.Foreground(lipgloss.Color(fgList))
+    s.StatusEmpty = s.StatusEmpty.Foreground(lipgloss.Color(fgList))
+    s.StatusBarActiveFilter = s.StatusBarActiveFilter.Foreground(lipgloss.Color(accentHex))
+    s.StatusBarFilterCount = s.StatusBarFilterCount.Foreground(lipgloss.Color(fgList))
     s.NoItems = s.NoItems.Foreground(lipgloss.Color(fgList))
     s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fgList))
+    s.ActivePaginationDot = s.ActivePaginationDot.Foreground(lipgloss.Color(accentHex))
+    // Inactive dot uses subdued palette color if available
+    inactive := m.th.Colors.Normal["black"]
+    if inactive == "" { inactive = fgList }
+    s.InactivePaginationDot = s.InactivePaginationDot.Foreground(lipgloss.Color(inactive))
+    s.ArabicPagination = s.ArabicPagination.Foreground(lipgloss.Color(inactive))
+    s.DividerDot = s.DividerDot.Foreground(lipgloss.Color(inactive))
     lst.Styles = s
     m.agents = lst
+    // Detail viewport init
+    vp := viewport.New(60, 12)
+    vp.SetContent("")
+    m.detail = vp
     return m
 }
 
@@ -120,6 +148,7 @@ func (m Model) Init() tea.Cmd {
 }
 
 type repoListMsg struct{ Entries []scanner.RepoEntry }
+type detailMsg struct{ Text string }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     switch msg := msg.(type) {
@@ -131,6 +160,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.table.SetHeight(h)
         // Resize agents list as overlay
         m.agents.SetSize(min(60, m.width-4), min(12, m.height-6))
+        m.detail.Width = min(m.width-6, 100)
+        m.detail.Height = min(m.height-8, 20)
         return m, nil
 
     case repoListMsg:
@@ -138,8 +169,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.repos = orderRepos(msg.Entries)
         m.refreshRows()
         return m, nil
+    case detailMsg:
+        // Apply some minimal section styling on the first lines
+        // First line is name, second path; then sections 'Recent commits' and 'README'
+        lines := strings.Split(msg.Text, "\n")
+        if len(lines) > 0 {
+            lines[0] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render(lines[0])
+        }
+        for i, ln := range lines {
+            if ln == "Recent commits" || ln == "README" {
+                lines[i] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render(ln)
+            }
+        }
+        m.detail.SetContent(strings.Join(lines, "\n"))
+        return m, nil
 
     case tea.KeyMsg:
+        if m.showDetail {
+            switch msg.String() {
+            case "q", "esc", "enter":
+                m.showDetail = false
+                return m, nil
+            }
+            var cmd tea.Cmd
+            m.detail, cmd = m.detail.Update(msg)
+            return m, cmd
+        }
         if m.showAgents {
             switch msg.String() {
             case "esc", "q":
@@ -188,6 +243,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "?":
             m.showHelp = !m.showHelp
             return m, nil
+        case "enter":
+            // Open detail overlay and load content
+            if len(m.visible) == 0 { return m, nil }
+            idx := m.table.Cursor()
+            if idx < 0 || idx >= len(m.visible) { return m, nil }
+            ri := m.visible[idx]
+            if ri < 0 || ri >= len(m.repos) { return m, nil }
+            m.showDetail = true
+            m.status = ""
+            return m, loadDetailCmd(m.repos[ri])
         case "/":
             m.filtering = true
             m.input.SetValue(m.filter)
@@ -306,6 +371,13 @@ func (m Model) View() string {
     if m.showAgents {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, m.agents.View())
+    }
+    if m.showDetail {
+        fmt.Fprintln(&b)
+        // Simple headline and instructions
+        head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render("Details (Esc/Enter to close)")
+        fmt.Fprintln(&b, head)
+        fmt.Fprintln(&b, m.detail.View())
     }
     return b.String()
 }
@@ -441,5 +513,39 @@ func scanCmd(cfg config.Config) tea.Cmd {
     return func() tea.Msg {
         entries, _ := scanner.Scan(cfg)
         return repoListMsg{Entries: entries}
+    }
+}
+
+func loadDetailCmd(r scanner.RepoEntry) tea.Cmd {
+    return func() tea.Msg {
+        // Build detail content lazily (plain text; styling applied in View)
+        var sb strings.Builder
+        fmt.Fprintln(&sb, r.Name)
+        fmt.Fprintf(&sb, "%s\n", r.Path)
+        fmt.Fprintf(&sb, "Branch: %s\n", r.Branch)
+        fmt.Fprintf(&sb, "Ahead/Behind: %d/%d\n", r.Ahead, r.Behind)
+        fmt.Fprintf(&sb, "Dirty: %v  Conflicts: %d\n", r.Dirty, r.Conflicts)
+        fmt.Fprintf(&sb, "Last: %s\n", r.LastAge)
+        // Recent commits
+        fmt.Fprintln(&sb)
+        fmt.Fprintln(&sb, "Recent commits")
+        commits := scanner.RecentCommits(r.Path, 8)
+        if len(commits) == 0 {
+            fmt.Fprintln(&sb, "No commits")
+        } else {
+            for _, c := range commits {
+                fmt.Fprintln(&sb, c)
+            }
+        }
+        // README snippet
+        fmt.Fprintln(&sb)
+        fmt.Fprintln(&sb, "README")
+        readme := scanner.ReadmeSnippet(r.Path, 24)
+        if len(readme) == 0 {
+            fmt.Fprintln(&sb, "(none)")
+        } else {
+            for _, ln := range readme { fmt.Fprintln(&sb, ln) }
+        }
+        return detailMsg{Text: sb.String()}
     }
 }
