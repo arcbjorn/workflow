@@ -5,12 +5,15 @@ import (
     "os"
     "os/exec"
     "path/filepath"
+    "encoding/json"
     "strconv"
     "strings"
     "sync"
     "time"
 
     "workflow/internal/config"
+    toml "github.com/pelletier/go-toml/v2"
+    "gopkg.in/yaml.v3"
 )
 
 type RepoEntry struct {
@@ -23,6 +26,10 @@ type RepoEntry struct {
     Conflicts int
     LastAge string // e.g., 3d, 5h, 2mo
     Detached bool
+    Monorepo bool       // parent has workspace members
+    WorkspacePkg bool   // this entry is a workspace/package under a monorepo
+    PackageName string  // optional package/crate name for workspace packages
+    ParentPath  string  // parent repo root for workspace packages
 }
 
 // Scan finds git repos under roots (depth-limited) and collects status.
@@ -42,7 +49,7 @@ func Scan(cfg config.Config) ([]RepoEntry, error) {
             }
         }
     }
-    // Concurrency limited scan
+    // Concurrency limited scan for parent repos
     out := make([]RepoEntry, len(repos))
     var wg sync.WaitGroup
     sem := make(chan struct{}, max(8, 2*intConcurrency()))
@@ -59,7 +66,40 @@ func Scan(cfg config.Config) ([]RepoEntry, error) {
         }()
     }
     wg.Wait()
-    return out, nil
+
+    // Discover monorepo workspace packages and append as separate rows
+    // while marking parent as Monorepo
+    parentIndex := map[string]int{}
+    for i, e := range out { parentIndex[e.Path] = i }
+    var children []RepoEntry
+    for _, e := range out {
+        ws := discoverWorkspaces(e.Path)
+        if len(ws) > 0 {
+            // mark parent
+            if idx, ok := parentIndex[e.Path]; ok {
+                out[idx].Monorepo = true
+            }
+            for _, c := range ws {
+                child := collectRepo(c.Path)
+                // prefer package name if available
+                if c.PackageName != "" { child.Name = c.PackageName } else { child.Name = filepath.Base(c.Path) }
+                child.WorkspacePkg = true
+                child.ParentPath = e.Path
+                child.PackageName = c.PackageName
+                children = append(children, child)
+            }
+        }
+    }
+    // Combine and dedupe by path
+    combined := append(out, children...)
+    uniq := make([]RepoEntry, 0, len(combined))
+    seen := map[string]struct{}{}
+    for _, e := range combined {
+        if _, ok := seen[e.Path]; ok { continue }
+        seen[e.Path] = struct{}{}
+        uniq = append(uniq, e)
+    }
+    return uniq, nil
 }
 
 func intConcurrency() int {
@@ -204,4 +244,175 @@ func lastCommitAge(path string) string {
     }
     months := int(d.Hours() / (24*30))
     return strconv.Itoa(months) + "mo"
+}
+
+// Workspace discovery
+type wsEntry struct {
+    Path        string
+    PackageName string
+}
+
+func discoverWorkspaces(repoRoot string) []wsEntry {
+    var out []wsEntry
+    // pnpm-workspace.yaml
+    out = append(out, discoverPNPM(repoRoot)...)
+    // Yarn/Node workspaces via package.json
+    out = append(out, discoverNodeWorkspaces(repoRoot)...)
+    // Cargo workspace
+    out = append(out, discoverCargo(repoRoot)...)
+    // Git submodules
+    out = append(out, discoverGitSubmodules(repoRoot)...)
+    // de-dup
+    seen := map[string]bool{}
+    uniq := make([]wsEntry, 0, len(out))
+    for _, e := range out {
+        p, _ := filepath.Abs(e.Path)
+        if !seen[p] {
+            seen[p] = true
+            uniq = append(uniq, e)
+        }
+    }
+    return uniq
+}
+
+// PNPM workspaces
+func discoverPNPM(root string) []wsEntry {
+    var out []wsEntry
+    ypaths := []string{"pnpm-workspace.yaml", "pnpm-workspace.yml"}
+    for _, n := range ypaths {
+        p := filepath.Join(root, n)
+        b, err := os.ReadFile(p)
+        if err != nil { continue }
+        // parse minimal YAML
+        var node map[string]any
+        if err := yaml.Unmarshal(b, &node); err != nil { continue }
+        pkgs, _ := node["packages"].([]any)
+        if pkgs == nil {
+            // possibly string slice? yaml unmarshals into []interface{}
+            // handle later
+        }
+        var globs []string
+        switch v := node["packages"].(type) {
+        case []any:
+            for _, it := range v { if s, ok := it.(string); ok { globs = append(globs, s) } }
+        case []string:
+            globs = append(globs, v...)
+        }
+        for _, g := range globs {
+            // skip negated globs for now
+            if strings.HasPrefix(g, "!") { continue }
+            // expand
+            matches, _ := filepath.Glob(filepath.Join(root, g))
+            for _, m := range matches {
+                // only directories with package.json
+                if fi, err := os.Stat(m); err == nil && fi.IsDir() {
+                    if _, err := os.Stat(filepath.Join(m, "package.json")); err != nil { continue }
+                    out = append(out, wsEntry{Path: m, PackageName: nodePackageName(m)})
+                }
+            }
+        }
+        break
+    }
+    return out
+}
+
+// Node workspaces via package.json workspaces field
+func discoverNodeWorkspaces(root string) []wsEntry {
+    pj := filepath.Join(root, "package.json")
+    b, err := os.ReadFile(pj)
+    if err != nil { return nil }
+    var pkg struct {
+        Workspaces any `json:"workspaces"`
+    }
+    if err := json.Unmarshal(b, &pkg); err != nil { return nil }
+    var globs []string
+    switch v := pkg.Workspaces.(type) {
+    case []any:
+        for _, it := range v { if s, ok := it.(string); ok { globs = append(globs, s) } }
+    case map[string]any:
+        if pkgs, ok := v["packages"].([]any); ok {
+            for _, it := range pkgs { if s, ok := it.(string); ok { globs = append(globs, s) } }
+        }
+    }
+    var out []wsEntry
+    for _, g := range globs {
+        if strings.HasPrefix(g, "!") { continue }
+        matches, _ := filepath.Glob(filepath.Join(root, g))
+        for _, m := range matches {
+            if fi, err := os.Stat(m); err == nil && fi.IsDir() {
+                if _, err := os.Stat(filepath.Join(m, "package.json")); err != nil { continue }
+                out = append(out, wsEntry{Path: m, PackageName: nodePackageName(m)})
+            }
+        }
+    }
+    return out
+}
+
+func nodePackageName(dir string) string {
+    b, err := os.ReadFile(filepath.Join(dir, "package.json"))
+    if err != nil { return "" }
+    var o struct{ Name string `json:"name"` }
+    if err := json.Unmarshal(b, &o); err != nil { return "" }
+    return o.Name
+}
+
+// Cargo workspace via Cargo.toml
+func discoverCargo(root string) []wsEntry {
+    var out []wsEntry
+    b, err := os.ReadFile(filepath.Join(root, "Cargo.toml"))
+    if err != nil { return nil }
+    var tomlRoot map[string]any
+    if err := toml.Unmarshal(b, &tomlRoot); err != nil { return nil }
+    ws, _ := tomlRoot["workspace"].(map[string]any)
+    if ws == nil { return nil }
+    var members []string
+    switch v := ws["members"].(type) {
+    case []any:
+        for _, it := range v { if s, ok := it.(string); ok { members = append(members, s) } }
+    case []string:
+        members = append(members, v...)
+    }
+    for _, g := range members {
+        if strings.HasPrefix(g, "!") { continue }
+        matches, _ := filepath.Glob(filepath.Join(root, g))
+        for _, m := range matches {
+            if fi, err := os.Stat(m); err == nil && fi.IsDir() {
+                if _, err := os.Stat(filepath.Join(m, "Cargo.toml")); err != nil { continue }
+                out = append(out, wsEntry{Path: m, PackageName: cargoPackageName(m)})
+            }
+        }
+    }
+    return out
+}
+
+func cargoPackageName(dir string) string {
+    b, err := os.ReadFile(filepath.Join(dir, "Cargo.toml"))
+    if err != nil { return "" }
+    var t map[string]any
+    if err := toml.Unmarshal(b, &t); err != nil { return "" }
+    if pkg, ok := t["package"].(map[string]any); ok {
+        if n, ok := pkg["name"].(string); ok { return n }
+    }
+    return ""
+}
+
+// Git submodules under root
+func discoverGitSubmodules(root string) []wsEntry {
+    b, err := os.ReadFile(filepath.Join(root, ".gitmodules"))
+    if err != nil { return nil }
+    lines := strings.Split(string(b), "\n")
+    var out []wsEntry
+    for _, ln := range lines {
+        ln = strings.TrimSpace(ln)
+        if strings.HasPrefix(ln, "path = ") {
+            p := strings.TrimSpace(strings.TrimPrefix(ln, "path = "))
+            full := filepath.Join(root, p)
+            if fi, err := os.Stat(full); err == nil && fi.IsDir() {
+                if isGitRepo(full) {
+                    out = append(out, wsEntry{Path: full})
+                }
+            }
+        }
+    }
+    return out
 }
