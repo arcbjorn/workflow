@@ -448,7 +448,11 @@ func (m Model) View() string {
     // indicators
     if m.grouped { title += "  [grouped]" }
     title += fmt.Sprintf("  [sort:%s%s]", m.sortKey, map[bool]string{true:"↑", false:"↓"}[m.sortAsc])
-    fmt.Fprintln(&b, titleStyle.Render(title))
+    if m.scanning {
+        fmt.Fprintln(&b, titleStyle.Render(m.spin.View()+" "+title))
+    } else {
+        fmt.Fprintln(&b, titleStyle.Render(title))
+    }
     // separator styled with a subtle theme foreground
     sep := strings.Repeat("─", max(10, m.width))
     fmt.Fprintln(&b, headerStyle.Faint(true).Render(sep))
@@ -481,6 +485,18 @@ func (m Model) View() string {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  m group  x expand  ? help  q quit")
         fmt.Fprintln(&b, "Enter details  r tasks  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents")
+        // badges legend
+        fmt.Fprintln(&b)
+        legend := fmt.Sprintf("Badges: [%s dirty] [%s conflicts] [%s ahead] [%s behind] [%s detached] [%s parent] [%s pkg]",
+            colorBadge("*", m.th, "yellow"),
+            colorBadge("‼", m.th, "red"),
+            colorBadge("⇡", m.th, "green"),
+            colorBadge("⇣", m.th, "magenta"),
+            colorBadge("det", m.th, "cyan"),
+            colorBadge("mono", m.th, "blue"),
+            colorBadge("pkg", m.th, "blue"),
+        )
+        fmt.Fprintln(&b, legend)
     }
     if m.showAgents {
         fmt.Fprintln(&b)
@@ -694,10 +710,17 @@ func (m *Model) renderName(r scanner.RepoEntry, indent string) string {
 }
 
 func colorBadge(s string, th theme.Theme, key string) string {
-    hex := th.Colors.Normal[key]
-    if hex == "" { hex = th.Colors.Bright[key] }
+    hex := ""
+    if th.Dark {
+        if v := th.Colors.Bright[key]; v != "" { hex = v }
+    }
+    if hex == "" {
+        if v := th.Colors.Normal[key]; v != "" { hex = v } else if v := th.Colors.Bright[key]; v != "" { hex = v }
+    }
     if hex == "" { hex = pickAccent(th.Colors, th.Dark) }
-    return lipgloss.NewStyle().Foreground(lipgloss.Color(hex)).Render(s)
+    st := lipgloss.NewStyle().Foreground(lipgloss.Color(hex))
+    if !th.Dark { st = st.Faint(true) }
+    return st.Render(s)
 }
 
 func (m *Model) isHidden(path string) bool {
