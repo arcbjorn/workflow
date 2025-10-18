@@ -446,7 +446,7 @@ func (m Model) View() string {
 
     if m.showHelp {
         fmt.Fprintln(&b)
-        fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  ? help  q quit")
+        fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  m group  x expand  ? help  q quit")
         fmt.Fprintln(&b, "Enter details  r tasks  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents")
     }
     if m.showAgents {
@@ -569,34 +569,88 @@ func ageScore(a string) time.Duration {
 func (m *Model) refreshRows() {
     rows := []table.Row{}
     m.visible = m.visible[:0]
-    for i, r := range m.repos {
-        if m.filter != "" {
-            q := strings.ToLower(m.filter)
-            if !strings.Contains(strings.ToLower(r.Name), q) && !strings.Contains(strings.ToLower(r.Branch), q) {
-                continue
+    if !m.grouped {
+        for i, r := range m.repos {
+            if m.filter != "" {
+                q := strings.ToLower(m.filter)
+                if !strings.Contains(strings.ToLower(r.Name), q) && !strings.Contains(strings.ToLower(r.Branch), q) {
+                    continue
+                }
+            }
+            dirty := ""
+            if r.Dirty { dirty = "*" }
+            ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
+            state := bucket(r.LastAge)
+            name := m.renderName(r, "")
+            rows = append(rows, table.Row{name, state, r.Branch, dirty, ab, r.LastAge})
+            m.visible = append(m.visible, i)
+        }
+    } else {
+        // Build child index and set for quick lookup
+        childrenOf := map[string][]int{}
+        childSet := map[int]bool{}
+        for i, r := range m.repos {
+            if r.WorkspacePkg && r.ParentPath != "" {
+                childrenOf[r.ParentPath] = append(childrenOf[r.ParentPath], i)
+                childSet[i] = true
             }
         }
-        dirty := ""
-        if r.Dirty { dirty = "*" }
-        ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
-        state := bucket(r.LastAge)
-        // Name with badges
-        name := r.Name
-        badges := []string{}
-        if r.Dirty { badges = append(badges, "*") }
-        if r.Conflicts > 0 { badges = append(badges, "‼") }
-        if r.Ahead > 0 { badges = append(badges, "⇡") }
-        if r.Behind > 0 { badges = append(badges, "⇣") }
-        if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { badges = append(badges, "det") }
-        if r.Monorepo { badges = append(badges, "mono") }
-        if r.WorkspacePkg { badges = append(badges, "pkg") }
-        if len(badges) > 0 {
-            name = fmt.Sprintf("%s [%s]", name, strings.Join(badges, ""))
+        // helper to maybe render a row
+        addRow := func(i int, r scanner.RepoEntry, indent string) {
+            if m.filter != "" {
+                q := strings.ToLower(m.filter)
+                n := r.Name
+                if r.WorkspacePkg && r.PackageName != "" { n = r.PackageName }
+                if !strings.Contains(strings.ToLower(n), q) && !strings.Contains(strings.ToLower(r.Branch), q) {
+                    return
+                }
+            }
+            dirty := ""
+            if r.Dirty { dirty = "*" }
+            ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
+            state := bucket(r.LastAge)
+            name := m.renderName(r, indent)
+            rows = append(rows, table.Row{name, state, r.Branch, dirty, ab, r.LastAge})
+            m.visible = append(m.visible, i)
         }
-        rows = append(rows, table.Row{name, state, r.Branch, dirty, ab, r.LastAge})
-        m.visible = append(m.visible, i)
+        for i, r := range m.repos {
+            if r.WorkspacePkg { continue } // will be rendered under parent
+            addRow(i, r, "")
+            if r.Monorepo && m.expanded[r.Path] {
+                // sort children by name
+                ch := childrenOf[r.Path]
+                sort.SliceStable(ch, func(a, b int) bool {
+                    na := m.repos[ch[a]].Name
+                    nb := m.repos[ch[b]].Name
+                    if m.repos[ch[a]].PackageName != "" { na = m.repos[ch[a]].PackageName }
+                    if m.repos[ch[b]].PackageName != "" { nb = m.repos[ch[b]].PackageName }
+                    return na < nb
+                })
+                for _, ci := range ch {
+                    addRow(ci, m.repos[ci], "  ")
+                }
+            }
+        }
     }
     m.table.SetRows(rows)
+}
+
+func (m *Model) renderName(r scanner.RepoEntry, indent string) string {
+    // determine base display name
+    base := r.Name
+    if r.WorkspacePkg && r.PackageName != "" { base = r.PackageName }
+    badges := []string{}
+    if r.Dirty { badges = append(badges, "*") }
+    if r.Conflicts > 0 { badges = append(badges, "‼") }
+    if r.Ahead > 0 { badges = append(badges, "⇡") }
+    if r.Behind > 0 { badges = append(badges, "⇣") }
+    if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { badges = append(badges, "det") }
+    if r.Monorepo { badges = append(badges, "mono") }
+    if r.WorkspacePkg { badges = append(badges, "pkg") }
+    if len(badges) > 0 {
+        return indent + fmt.Sprintf("%s [%s]", base, strings.Join(badges, ""))
+    }
+    return indent + base
 }
 
 type agentItem struct{
