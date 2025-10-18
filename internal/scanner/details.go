@@ -23,7 +23,7 @@ func RecentCommits(path string, n int) []string {
 // ReadmeSnippet returns up to maxLines of the first README file we can find.
 func ReadmeSnippet(path string, maxLines int) []string {
     if maxLines <= 0 { return nil }
-    name := findReadme(path)
+    name := FindReadme(path)
     if name == "" { return nil }
     f, err := os.Open(filepath.Join(path, name))
     if err != nil { return nil }
@@ -37,7 +37,8 @@ func ReadmeSnippet(path string, maxLines int) []string {
     return out
 }
 
-func findReadme(path string) string {
+// FindReadme returns the filename of a README in the directory, if any.
+func FindReadme(path string) string {
     entries, err := os.ReadDir(path)
     if err != nil { return "" }
     candidates := []string{}
@@ -51,6 +52,16 @@ func findReadme(path string) string {
     if len(candidates) == 0 { return "" }
     sort.Strings(candidates)
     return candidates[0]
+}
+
+// ReadmeContent returns the full README content up to maxBytes.
+func ReadmeContent(path string, maxBytes int) (string, bool) {
+    name := FindReadme(path)
+    if name == "" { return "", false }
+    b, err := os.ReadFile(filepath.Join(path, name))
+    if err != nil { return "", false }
+    if maxBytes > 0 && len(b) > maxBytes { b = b[:maxBytes] }
+    return string(b), true
 }
 
 func splitNonEmpty(s string) []string {
