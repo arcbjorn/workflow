@@ -20,10 +20,9 @@ func Detect(mode string) Theme {
     // First: explicit overrides
     if mode == "dark" { t.Dark = true; return t }
     if mode == "light" { t.Dark = false; return t }
-    // Auto: try Alacritty config colors
-    if pal, ok := loadFromAlacritty(); ok {
+    // Auto: prefer Omarchy current theme
+    if pal, ok := loadFromOmarchy(); ok {
         t.Colors = pal
-        // determine dark/light from background luminance
         r, g, b, okc := hexToRGB(pal.PrimaryBackground)
         if okc {
             l := 0.2126*float64(r)/255 + 0.7152*float64(g)/255 + 0.0722*float64(b)/255
