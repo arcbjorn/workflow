@@ -15,7 +15,6 @@ import (
     "github.com/charmbracelet/bubbles/spinner"
     "github.com/charmbracelet/bubbles/viewport"
     "github.com/charmbracelet/lipgloss"
-    "github.com/charmbracelet/glamour"
     "workflow/internal/config"
     "workflow/internal/run"
     "workflow/internal/scanner"
@@ -51,8 +50,6 @@ type Model struct {
     // Detail overlay
     showDetail bool
     detail     viewport.Model
-    mdEnabled bool
-    mdCache   map[string]string
 
     // Sorting
     sortKey string // last|ab|branch
@@ -112,7 +109,6 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         sortAsc:     false,
         grouped:     false,
         expanded:    map[string]bool{},
-        mdCache:     make(map[string]string),
     }
     // Spinner init
     sp := spinner.New()
@@ -158,7 +154,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showTasks {
             m.taskItems.SetSize(min(60, m.width-4), min(12, m.height-6))
         }
-        m.detail.Width = min(m.width-6, 100)
+        // Use near full width for details to maximize readability
+        if m.width > 4 { m.detail.Width = m.width - 2 } else { m.detail.Width = m.width }
         m.detail.Height = min(m.height-8, 20)
         return m, nil
 
@@ -189,22 +186,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         // Wait for next change
         return m, themeWatchWaitCmd()
     case detailMsg:
-        // Apply some minimal section styling on the first lines
-        // First line is name, second path; then sections 'Recent commits' and 'README'
-        if m.mdEnabled {
-            // Render README (if present) in Markdown (theme-aware)
-            content, ok := scanner.ReadmeContent(m.currentPath(), 1<<20)
-            if ok {
-                r, _ := glamour.NewTermRenderer(
-                    glamour.WithAutoStyle(),
-                    glamour.WithWordWrap(m.detail.Width),
-                )
-                if out, err := r.Render(content); err == nil {
-                    m.detail.SetContent(out)
-                    return m, nil
-                }
-            }
-        }
+        // Apply some minimal section styling on the first lines (plain)
         lines := strings.Split(msg.Text, "\n")
         if len(lines) > 0 {
             lines[0] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render(lines[0])
@@ -249,15 +231,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.showDetail = false
                 m.updateTableHeight()
                 return m, nil
-            case "M":
-                // Toggle Markdown rendering for README while in details
-                m.mdEnabled = !m.mdEnabled
-                if len(m.visible) == 0 { return m, nil }
-                idx := m.table.Cursor()
-                if idx < 0 || idx >= len(m.visible) { return m, nil }
-                ri := m.visible[idx]
-                if ri < 0 || ri >= len(m.repos) { return m, nil }
-                return m, loadDetailCmd(m.repos[ri])
+            case "r":
+                p := m.currentPath()
+                if p == "" { return m, nil }
+                name := scanner.FindReadme(p)
+                if name == "" { m.status = "no README"; return m, nil }
+                file := filepath.Join(p, name)
+                cmd := "if command -v bat >/dev/null 2>&1; then bat --style=plain --decorations=never --paging=always --color=always '" + file + "'; " +
+                    "elif command -v batcat >/dev/null 2>&1; then batcat --style=plain --decorations=never --paging=always --color=always '" + file + "'; " +
+                    "else less '" + file + "'; fi"
+                if err := run.LaunchShellCmdNewWindow(p, cmd, m.cfg); err != nil { m.status = "open README: " + err.Error() } else { m.status = "opened README" }
+                return m, nil
             case "j":
                 m.detail.ScrollDown(1)
                 return m, nil
@@ -368,23 +352,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             if idx < 0 || idx >= len(m.visible) { return m, nil }
             ri := m.visible[idx]
             if ri < 0 || ri >= len(m.repos) { return m, nil }
+            repo := m.repos[ri]
             m.showDetail = true
             m.status = ""
             m.updateTableHeight()
-            return m, loadDetailCmd(m.repos[ri])
-        case "M":
-            // Toggle markdown rendering of README in details
-            m.mdEnabled = !m.mdEnabled
-            if m.showDetail {
-                // Synchronous re-render of detail content
-                if len(m.visible) == 0 { return m, nil }
-                idx := m.table.Cursor()
-                if idx < 0 || idx >= len(m.visible) { return m, nil }
-                ri := m.visible[idx]
-                if ri < 0 || ri >= len(m.repos) { return m, nil }
-                m.renderDetailNow(m.repos[ri])
-                return m, nil
-            }
+            return m, loadDetailCmd(repo)
+        case "b":
+            // Open README in external terminal via bat/less
+            p := m.currentPath()
+            if p == "" { return m, nil }
+            name := scanner.FindReadme(p)
+            if name == "" { m.status = "no README"; return m, nil }
+            file := filepath.Join(p, name)
+            cmd := "if command -v bat >/dev/null 2>&1; then bat --style=plain --decorations=never --paging=always --color=always '" + file + "'; " +
+                "elif command -v batcat >/dev/null 2>&1; then batcat --style=plain --decorations=never --paging=always --color=always '" + file + "'; " +
+                "else less '" + file + "'; fi"
+            if err := run.LaunchShellCmdNewWindow(p, cmd, m.cfg); err != nil { m.status = "open README: " + err.Error() } else { m.status = "opened README" }
             return m, nil
         case "/":
             m.filtering = true
@@ -556,9 +539,9 @@ func (m Model) View() string {
 
     if !m.reposLoaded {
         fmt.Fprintln(&b, "loading repos…")
-    } else if len(m.table.Rows()) == 0 {
+    } else if len(m.table.Rows()) == 0 && !m.showDetail {
         fmt.Fprintln(&b, "no projects found under configured roots")
-    } else {
+    } else if !m.showDetail {
         fmt.Fprintln(&b, m.table.View())
     }
 
@@ -612,8 +595,8 @@ func (m Model) View() string {
     }
     if m.showDetail {
         fmt.Fprintln(&b)
-        // Simple headline and instructions
-        head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render("Details (Esc/Enter to close)")
+        // Full-screen style details overlay (uses entire content area)
+        head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render("Details (Esc to close, r open README)")
         fmt.Fprintln(&b, head)
         fmt.Fprintln(&b, m.detail.View())
     }
@@ -1092,40 +1075,27 @@ func buildDetailPlainText(r scanner.RepoEntry) string {
 }
 
 func (m *Model) renderDetailNow(r scanner.RepoEntry) {
-    if m.mdEnabled {
-        key := fmt.Sprintf("%s#W%d#%t", r.Path, m.detail.Width, m.th.Dark)
-        if cached, ok := m.mdCache[key]; ok && cached != "" {
-            m.detail.SetContent(cached)
-            m.detail.GotoTop()
-            return
-        }
-        if content, ok := scanner.ReadmeContent(r.Path, 64*1024); ok { // limit for speed
-            rmd, _ := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(m.detail.Width))
-            if out, err := rmd.Render(content); err == nil {
-                m.mdCache[key] = out
-                m.detail.SetContent(out)
-                m.detail.GotoTop()
-                return
-            }
-        }
-    }
     m.detail.SetContent(buildDetailPlainText(r))
     m.detail.GotoTop()
 }
 
+// NOTE: Markdown rendering removed from inline UI to avoid latency.
+
+// renderReadmeWithBat removed: avoid synchronous blocking in Update path
+
 // updateTableHeight computes table height so the overall view fits in the window.
 func (m *Model) updateTableHeight() {
+    overlayOpen := m.showAgents || m.showTasks || m.showDetail
     overhead := 0
-    // Title + separator
+    // Title + separator always
     overhead += 2
-    // Filter input
-    if m.filtering { overhead += 2 }
-    // Status line
-    if m.status != "" { overhead += 2 }
-    // Stats bar
-    if m.reposLoaded { overhead += 2 }
-    // Help + legend
-    if m.showHelp { overhead += 5 }
+    // Only subtract bottom extras when no overlay is open
+    if !overlayOpen {
+        if m.filtering { overhead += 2 }
+        if m.status != "" { overhead += 2 }
+        if m.reposLoaded { overhead += 2 }
+        if m.showHelp { overhead += 5 }
+    }
 
     contentH := m.height - overhead
     if contentH < 6 { contentH = 6 }
@@ -1149,14 +1119,12 @@ func (m *Model) updateTableHeight() {
         return
     }
     if m.showDetail {
-        // Allocate ~40% of the content to details with bounds
-        detailH := int(float64(contentH) * 0.4)
-        if detailH < 8 { detailH = 8 }
-        if detailH > 24 { detailH = 24 }
-        tableH := contentH - (1 + detailH) // one blank line spacing
-        if tableH < 3 { tableH = 3 }
+        // Full overlay with a small header line and spacer printed above the viewport
+        // Reserve 2 lines (blank + header), give the rest to the viewport
+        detailH := contentH - 2
+        if detailH < 3 { detailH = 3 }
         m.detail.Height = detailH
-        m.table.SetHeight(tableH)
+        m.table.SetHeight(1) // keep minimal height behind overlay
         return
     }
     // Default: table fills content area
