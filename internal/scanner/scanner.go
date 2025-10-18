@@ -138,6 +138,7 @@ func collectRepo(path string) RepoEntry {
     // branch, ahead/behind, dirty/conflicts
     branch, ahead, behind, dirty, conflicts := parseStatus(path)
     st.Branch, st.Ahead, st.Behind, st.Dirty, st.Conflicts = branch, ahead, behind, dirty, conflicts
+    if branch == "(detached)" { st.Detached = true }
     // last commit age
     st.LastAge = lastCommitAge(path)
     return st
