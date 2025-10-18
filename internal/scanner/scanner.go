@@ -2,16 +2,17 @@ package scanner
 
 import (
     "bufio"
+    "encoding/json"
     "os"
     "os/exec"
     "path/filepath"
-    "encoding/json"
     "strconv"
     "strings"
     "sync"
     "time"
 
     "workflow/internal/config"
+    "workflow/internal/cache"
     toml "github.com/pelletier/go-toml/v2"
     "gopkg.in/yaml.v3"
 )
@@ -40,7 +41,15 @@ func Scan(cfg config.Config) ([]RepoEntry, error) {
     }
     found := map[string]struct{}{}
     var repos []string
+    // Try cache first
+    cd, _ := cache.Load()
+    ttl := 120 * time.Second
     for _, root := range roots {
+        cached := cache.GetRepos(cd, root, ttl)
+        if len(cached) > 0 {
+            for _, p := range cached { if _, ok := found[p]; !ok { found[p]=struct{}{}; repos=append(repos,p) } }
+            continue
+        }
         rs, _ := findGitRepos(root, cfg.Depth)
         for _, p := range rs {
             if _, ok := found[p]; !ok {
@@ -48,7 +57,10 @@ func Scan(cfg config.Config) ([]RepoEntry, error) {
                 repos = append(repos, p)
             }
         }
+        // update cache for this root
+        cache.PutRepos(&cd, root, rs)
     }
+    _ = cache.Save(cd)
     // Concurrency limited scan for parent repos
     out := make([]RepoEntry, len(repos))
     var wg sync.WaitGroup
@@ -260,6 +272,8 @@ func discoverWorkspaces(repoRoot string) []wsEntry {
     out = append(out, discoverNodeWorkspaces(repoRoot)...)
     // Cargo workspace
     out = append(out, discoverCargo(repoRoot)...)
+    // Go nested modules
+    out = append(out, discoverGoModules(repoRoot)...)
     // Git submodules
     out = append(out, discoverGitSubmodules(repoRoot)...)
     // de-dup
@@ -273,6 +287,40 @@ func discoverWorkspaces(repoRoot string) []wsEntry {
         }
     }
     return uniq
+}
+
+// Go modules beneath root (depth-limited)
+func discoverGoModules(root string) []wsEntry {
+    var out []wsEntry
+    maxDepth := 2
+    filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+        if err != nil { return nil }
+        if !d.IsDir() { return nil }
+        if path == root { return nil }
+        rel, _ := filepath.Rel(root, path)
+        depth := 1 + strings.Count(rel, string(os.PathSeparator))
+        if depth > maxDepth { return filepath.SkipDir }
+        if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+            out = append(out, wsEntry{Path: path, PackageName: goModuleName(path)})
+            return filepath.SkipDir
+        }
+        return nil
+    })
+    return out
+}
+
+func goModuleName(dir string) string {
+    b, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+    if err != nil { return "" }
+    for _, ln := range strings.Split(string(b), "\n") {
+        ln = strings.TrimSpace(ln)
+        if strings.HasPrefix(ln, "module ") {
+            mod := strings.TrimSpace(strings.TrimPrefix(ln, "module "))
+            if i := strings.LastIndex(mod, "/"); i >= 0 { return mod[i+1:] }
+            return mod
+        }
+    }
+    return ""
 }
 
 // PNPM workspaces
