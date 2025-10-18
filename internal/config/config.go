@@ -36,6 +36,13 @@ type Config struct {
     Agents   Agents   `yaml:"agents"`
 
     Theme string `yaml:"theme"`
+
+    Overrides map[string]RepoOverride `yaml:"overrides"`
+}
+
+type RepoOverride struct {
+    Hidden      bool   `yaml:"hidden"`
+    DisplayName string `yaml:"name"`
 }
 
 func Default() Config {
@@ -58,6 +65,7 @@ func Default() Config {
             CmdTemplate: "cd {cwd} && {cmd}",
         },
         Theme: "auto",
+        Overrides: map[string]RepoOverride{},
     }
 }
 
@@ -105,6 +113,7 @@ func Load() (Config, error) {
     if len(user.Agents.Prelude) > 0 { merge.Agents.Prelude = user.Agents.Prelude }
     if user.Agents.CmdTemplate != "" { merge.Agents.CmdTemplate = user.Agents.CmdTemplate }
     if user.Theme != "" { merge.Theme = user.Theme }
+    if len(user.Overrides) > 0 { merge.Overrides = user.Overrides }
     return merge, nil
 }
 
@@ -117,4 +126,3 @@ func ExpandUser(p string) string {
     if p == "~" { return home }
     return filepath.Join(home, p[2:])
 }
-
