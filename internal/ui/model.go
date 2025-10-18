@@ -54,6 +54,9 @@ type Model struct {
 
     // theme watch
     themeWatch bool
+    // Grouping
+    grouped  bool
+    expanded map[string]bool // parent path -> expanded
     // Tasks overlay
     showTasks bool
     taskItems list.Model
@@ -89,6 +92,8 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         showAgents:  false,
         sortKey:     "last",
         sortAsc:     false,
+        grouped:     false,
+        expanded:    map[string]bool{},
     }
     m.applyThemeToUI()
     m.setupAgentsList()
@@ -238,6 +243,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             return m, tea.Quit
         case "?":
             m.showHelp = !m.showHelp
+            return m, nil
+        case "m":
+            // Toggle grouped view
+            m.grouped = !m.grouped
+            if m.grouped {
+                // Initialize all parents expanded by default
+                for _, r := range m.repos {
+                    if r.Monorepo {
+                        if _, ok := m.expanded[r.Path]; !ok { m.expanded[r.Path] = true }
+                    }
+                }
+            }
+            m.refreshRows()
+            m.status = map[bool]string{true:"grouped view", false:"flat view"}[m.grouped]
+            return m, nil
+        case "x":
+            // Expand/collapse parent group
+            if len(m.visible) == 0 { return m, nil }
+            idx := m.table.Cursor()
+            if idx < 0 || idx >= len(m.visible) { return m, nil }
+            ri := m.visible[idx]
+            if ri < 0 || ri >= len(m.repos) { return m, nil }
+            r := m.repos[ri]
+            var parent string
+            if r.WorkspacePkg {
+                parent = r.ParentPath
+            } else if r.Monorepo {
+                parent = r.Path
+            }
+            if parent != "" {
+                m.expanded[parent] = !m.expanded[parent]
+                m.refreshRows()
+                return m, nil
+            }
             return m, nil
         case "enter":
             // Open detail overlay and load content
@@ -549,6 +588,8 @@ func (m *Model) refreshRows() {
         if r.Ahead > 0 { badges = append(badges, "⇡") }
         if r.Behind > 0 { badges = append(badges, "⇣") }
         if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { badges = append(badges, "det") }
+        if r.Monorepo { badges = append(badges, "mono") }
+        if r.WorkspacePkg { badges = append(badges, "pkg") }
         if len(badges) > 0 {
             name = fmt.Sprintf("%s [%s]", name, strings.Join(badges, ""))
         }
