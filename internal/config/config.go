@@ -38,6 +38,9 @@ type Config struct {
     Theme string `yaml:"theme"`
 
     Overrides map[string]RepoOverride `yaml:"overrides"`
+
+    // Cache TTL in seconds for repo discovery (filesystem walking), not git status.
+    CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
 }
 
 type RepoOverride struct {
@@ -66,6 +69,7 @@ func Default() Config {
         },
         Theme: "auto",
         Overrides: map[string]RepoOverride{},
+        CacheTTLSeconds: 120,
     }
 }
 
@@ -114,6 +118,7 @@ func Load() (Config, error) {
     if user.Agents.CmdTemplate != "" { merge.Agents.CmdTemplate = user.Agents.CmdTemplate }
     if user.Theme != "" { merge.Theme = user.Theme }
     if len(user.Overrides) > 0 { merge.Overrides = user.Overrides }
+    if user.CacheTTLSeconds != 0 { merge.CacheTTLSeconds = user.CacheTTLSeconds }
     return merge, nil
 }
 
