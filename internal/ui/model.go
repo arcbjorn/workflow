@@ -11,6 +11,7 @@ import (
     "github.com/charmbracelet/bubbles/table"
     "github.com/charmbracelet/bubbles/textinput"
     "github.com/charmbracelet/bubbles/list"
+    "github.com/charmbracelet/lipgloss"
     "workflow/internal/config"
     "workflow/internal/run"
     "workflow/internal/scanner"
@@ -71,12 +72,47 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         filtering:   false,
         showAgents:  false,
     }
+    // Apply theme colors (foreground/background/accent)
+    fg := th.Colors.PrimaryForeground
+    bg := ""
+    if th.Dark {
+        bg = "" // keep terminal background
+    } else {
+        bg = ""
+    }
+    accent := th.Colors.Normal["blue"]
+    if accent == "" { accent = th.Colors.Bright["blue"] }
+    if accent == "" { accent = fg }
+    applyThemeColors(fg, bg, accent)
+    // Style selected row
+    st := table.DefaultStyles()
+    st.Selected = selectedStyle
+    m.table.SetStyles(st)
     // Agents list setup
     items := m.agentItems()
-    lst := list.New(items, list.NewDefaultDelegate(), 40, 10)
+    d := list.NewDefaultDelegate()
+    // Themed delegate styles
+    fgHex := m.th.Colors.PrimaryForeground
+    if fgHex == "" { if m.th.Dark { fgHex = "#dddddd" } else { fgHex = "#1a1a1a" } }
+    accentHex := m.th.Colors.Normal["blue"]
+    if accentHex == "" { accentHex = m.th.Colors.Bright["blue"] }
+    if accentHex == "" { if m.th.Dark { accentHex = "#8ab4f8" } else { accentHex = "#1a73e8" } }
+    d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(lipgloss.Color(fgHex))
+    d.Styles.NormalDesc = d.Styles.NormalDesc.Foreground(lipgloss.Color(fgHex))
+    d.Styles.SelectedTitle = d.Styles.SelectedTitle.
+        Foreground(lipgloss.Color(accentHex)).
+        BorderForeground(lipgloss.Color(accentHex))
+    d.Styles.SelectedDesc = d.Styles.SelectedDesc.Foreground(lipgloss.Color(accentHex))
+    lst := list.New(items, d, 40, 10)
     lst.Title = "Choose agent"
     lst.SetShowStatusBar(false)
     lst.SetFilteringEnabled(false)
+    // Themed list styles
+    s := lst.Styles
+    s.Title = s.Title.Foreground(lipgloss.Color(accentHex))
+    s.FilterCursor = s.FilterCursor.Foreground(lipgloss.Color(accentHex))
+    s.FilterPrompt = s.FilterPrompt.Foreground(lipgloss.Color(accentHex))
+    lst.Styles = s
     m.agents = lst
     return m
 }
@@ -244,7 +280,7 @@ func (m Model) View() string {
     if m.filter != "" {
         title += fmt.Sprintf("  [/%s]", m.filter)
     }
-    fmt.Fprintln(&b, title)
+    fmt.Fprintln(&b, titleStyle.Render(title))
     fmt.Fprintln(&b, strings.Repeat("─", max(10, m.width)))
 
     if !m.reposLoaded {
