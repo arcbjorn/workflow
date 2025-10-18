@@ -2,6 +2,7 @@ package ui
 
 import (
     "fmt"
+    "path/filepath"
     "os/exec"
     "sort"
     "strings"
@@ -61,6 +62,8 @@ type Model struct {
     showTasks bool
     taskItems list.Model
     curTasks  []tasks.Task
+    // Scan busy state
+    scanning bool
 }
 
 func NewModel(cfg config.Config, th theme.Theme) Model {
@@ -108,7 +111,7 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
 func (m Model) Init() tea.Cmd {
     // Start async scan and theme watch (Omarchy)
     return tea.Batch(
-        func() tea.Msg { entries, _ := scanner.Scan(m.cfg); return repoListMsg{Entries: entries} },
+        func() tea.Msg { return startScanMsg{} },
         themeWatchStartCmd(),
         themeWatchWaitCmd(),
     )
@@ -116,6 +119,7 @@ func (m Model) Init() tea.Cmd {
 
 type repoListMsg struct{ Entries []scanner.RepoEntry }
 type detailMsg struct{ Text string }
+type startScanMsg struct{}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     switch msg := msg.(type) {
@@ -125,6 +129,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         h := m.height - 6
         if h < 5 { h = 5 }
         m.table.SetHeight(h)
+        m.updateTableHeader()
         // Resize agents list as overlay
         m.agents.SetSize(min(60, m.width-4), min(12, m.height-6))
         m.detail.Width = min(m.width-6, 100)
@@ -135,7 +140,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.reposLoaded = true
         m.repos = orderRepos(msg.Entries, m.sortKey, m.sortAsc)
         m.refreshRows()
+        m.scanning = false
         return m, nil
+    case startScanMsg:
+        if m.scanning { return m, nil }
+        m.scanning = true
+        m.status = "scanning…"
+        return m, scanCmd(m.cfg)
     case themeTickMsg:
         // If theme changed, reapply palette
         if !themesEqual(m.th, msg.Theme) {
@@ -295,6 +306,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.status = "type to filter; Enter apply; Esc cancel"
             return m, nil
         case "R":
+            if m.scanning { m.status = "already scanning"; return m, nil }
             m.status = "refreshing…"
             return m, scanCmd(m.cfg)
         case "r":
@@ -571,6 +583,8 @@ func (m *Model) refreshRows() {
     m.visible = m.visible[:0]
     if !m.grouped {
         for i, r := range m.repos {
+            // per-repo hide override
+            if m.isHidden(r.Path) { continue }
             if m.filter != "" {
                 q := strings.ToLower(m.filter)
                 if !strings.Contains(strings.ToLower(r.Name), q) && !strings.Contains(strings.ToLower(r.Branch), q) {
@@ -614,6 +628,7 @@ func (m *Model) refreshRows() {
             m.visible = append(m.visible, i)
         }
         for i, r := range m.repos {
+            if m.isHidden(r.Path) { continue }
             if r.WorkspacePkg { continue } // will be rendered under parent
             addRow(i, r, "")
             if r.Monorepo && m.expanded[r.Path] {
@@ -627,6 +642,7 @@ func (m *Model) refreshRows() {
                     return na < nb
                 })
                 for _, ci := range ch {
+                    if m.isHidden(m.repos[ci].Path) { continue }
                     addRow(ci, m.repos[ci], "  ")
                 }
             }
@@ -639,6 +655,8 @@ func (m *Model) renderName(r scanner.RepoEntry, indent string) string {
     // determine base display name
     base := r.Name
     if r.WorkspacePkg && r.PackageName != "" { base = r.PackageName }
+    // override display name from config
+    if name := m.overrideName(r.Path); name != "" { base = name }
     badges := []string{}
     if r.Dirty { badges = append(badges, "*") }
     if r.Conflicts > 0 { badges = append(badges, "‼") }
@@ -651,6 +669,39 @@ func (m *Model) renderName(r scanner.RepoEntry, indent string) string {
         return indent + fmt.Sprintf("%s [%s]", base, strings.Join(badges, ""))
     }
     return indent + base
+}
+
+func (m *Model) isHidden(path string) bool {
+    if len(m.cfg.Overrides) == 0 { return false }
+    if ov, ok := m.cfg.Overrides[path]; ok {
+        if ov.Hidden { return true }
+    }
+    for pat, ov := range m.cfg.Overrides {
+        if strings.ContainsAny(pat, "*?[") {
+            if ok, _ := filepath.Match(pat, path); ok {
+                if ov.Hidden { return true }
+            }
+        }
+    }
+    return false
+}
+
+func (m *Model) overrideName(path string) string {
+    if len(m.cfg.Overrides) == 0 { return "" }
+    // exact path match first
+    if ov, ok := m.cfg.Overrides[path]; ok {
+        if ov.DisplayName != "" { return ov.DisplayName }
+        return ""
+    }
+    // try glob patterns
+    for pat, ov := range m.cfg.Overrides {
+        if strings.ContainsAny(pat, "*?[") {
+            if ok, _ := filepath.Match(pat, path); ok {
+                if ov.DisplayName != "" { return ov.DisplayName }
+            }
+        }
+    }
+    return ""
 }
 
 type agentItem struct{
@@ -781,19 +832,28 @@ func (m *Model) setupAgentsList() {
 }
 
 func (m *Model) updateTableHeader() {
-    // build columns with sort indicator
+    // build columns with sort indicator and dynamic widths
     arrow := func(active bool) string {
         if !active { return "" }
         if m.sortAsc { return " ▲" }
         return " ▼"
     }
+    // fixed widths for non-name columns
+    wState := 7
+    wBranch := 12
+    wDelta := 2
+    wAB := 7
+    wLast := 6
+    totalFixed := wState + wBranch + wDelta + wAB + wLast + 5 // padding between columns
+    nameWidth := m.width - totalFixed
+    if nameWidth < 16 { nameWidth = 16 }
     cols := []table.Column{
-        {Title: "Name", Width: 28},
-        {Title: "State", Width: 7},
-        {Title: "Branch" + arrow(m.sortKey=="branch"), Width: 10},
-        {Title: "Δ", Width: 2},
-        {Title: "A/B" + arrow(m.sortKey=="ab"), Width: 5},
-        {Title: "Last" + arrow(m.sortKey=="last"), Width: 6},
+        {Title: "Name", Width: nameWidth},
+        {Title: "State", Width: wState},
+        {Title: "Branch" + arrow(m.sortKey=="branch"), Width: wBranch},
+        {Title: "Δ", Width: wDelta},
+        {Title: "A/B" + arrow(m.sortKey=="ab"), Width: wAB},
+        {Title: "Last" + arrow(m.sortKey=="last"), Width: wLast},
     }
     m.table.SetColumns(cols)
 }
