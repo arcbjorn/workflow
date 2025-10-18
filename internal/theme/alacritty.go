@@ -92,8 +92,16 @@ func parseAlacrittyWithImports(path string, visited map[string]struct{}) map[str
 }
 
 func extractImports(root map[string]any) []string {
+    // Support both legacy top-level import and new [general] import
     v, ok := root["import"]
-    if !ok { return nil }
+    if !ok {
+        if gen, ok2 := root["general"].(map[string]any); ok2 {
+            v, ok = gen["import"]
+            if !ok { return nil }
+        } else {
+            return nil
+        }
+    }
     switch vv := v.(type) {
     case string:
         return []string{vv}
