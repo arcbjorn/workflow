@@ -17,6 +17,7 @@ import (
     "workflow/internal/run"
     "workflow/internal/scanner"
     "workflow/internal/theme"
+    "workflow/internal/tasks"
 )
 
 type Model struct {
@@ -53,6 +54,10 @@ type Model struct {
 
     // theme watch
     themeWatch bool
+    // Tasks overlay
+    showTasks bool
+    taskItems list.Model
+    curTasks  []tasks.Task
 }
 
 func NewModel(cfg config.Config, th theme.Theme) Model {
@@ -152,6 +157,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         return m, nil
 
     case tea.KeyMsg:
+        if m.showTasks {
+            switch msg.String() {
+            case "esc", "q":
+                m.showTasks = false
+                return m, nil
+            case "enter":
+                idx := m.taskItems.Index()
+                if idx >= 0 && idx < len(m.curTasks) {
+                    path := m.currentPath()
+                    if path == "" { m.showTasks = false; return m, nil }
+                    cmdStr := m.curTasks[idx].Cmd
+                    if err := run.LaunchShellCmdNewWindow(path, cmdStr, m.cfg); err != nil {
+                        m.status = "task: " + err.Error()
+                    } else {
+                        m.status = "task launched: " + m.curTasks[idx].Name
+                    }
+                    m.showTasks = false
+                    return m, nil
+                }
+            }
+            var cmd tea.Cmd
+            m.taskItems, cmd = m.taskItems.Update(msg)
+            return m, cmd
+        }
         if m.showDetail {
             switch msg.String() {
             case "q", "esc", "enter":
@@ -229,6 +258,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "R":
             m.status = "refreshing…"
             return m, scanCmd(m.cfg)
+        case "r":
+            // Open tasks picker for current repo
+            path := m.currentPath()
+            if path == "" { return m, nil }
+            ts := tasks.Detect(path)
+            m.curTasks = ts
+            items := make([]list.Item, 0, len(ts))
+            for _, tsk := range ts {
+                items = append(items, taskItem{Task: tsk})
+            }
+            if len(items) == 0 {
+                m.status = "no tasks detected"
+                return m, nil
+            }
+            li := list.New(items, list.NewDefaultDelegate(), 60, 12)
+            li.Title = "Run task"
+            s := li.Styles
+            accHex := pickAccent(m.th.Colors, m.th.Dark)
+            fg := pickFG(m.th.Colors, m.th.Dark)
+            s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accHex))
+            s.NoItems = s.NoItems.Foreground(lipgloss.Color(fg))
+            s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fg))
+            li.Styles = s
+            m.taskItems = li
+            m.showTasks = true
+            return m, nil
         case "s":
             // Cycle sort key: last -> ab -> branch -> last
             switch m.sortKey {
@@ -358,6 +413,10 @@ func (m Model) View() string {
     if m.showAgents {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, m.agents.View())
+    }
+    if m.showTasks {
+        fmt.Fprintln(&b)
+        fmt.Fprintln(&b, m.taskItems.View())
     }
     if m.showDetail {
         fmt.Fprintln(&b)
@@ -511,6 +570,12 @@ func (a agentItem) Title() string {
 }
 func (a agentItem) Description() string { return a.cmd }
 func (a agentItem) FilterValue() string { return a.name + " " + a.cmd }
+
+type taskItem struct{ Task tasks.Task }
+
+func (t taskItem) Title() string { return t.Task.Name }
+func (t taskItem) Description() string { return t.Task.Cmd }
+func (t taskItem) FilterValue() string { return t.Task.Name + " " + t.Task.Cmd }
 
 func (m *Model) agentItems() []list.Item {
     items := []list.Item{}
