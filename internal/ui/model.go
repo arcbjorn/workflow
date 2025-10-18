@@ -50,6 +50,9 @@ type Model struct {
     // Sorting
     sortKey string // last|ab|branch
     sortAsc bool
+
+    // theme watch
+    themeWatch bool
 }
 
 func NewModel(cfg config.Config, th theme.Theme) Model {
@@ -82,62 +85,9 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         sortKey:     "last",
         sortAsc:     false,
     }
-    // Apply theme colors from Alacritty palette
-    applyThemePalette(th.Colors, th.Dark)
-    // Table styles from palette
-    st := table.DefaultStyles()
-    fgHex := pickFG(th.Colors, th.Dark)
-    accHex := pickAccent(th.Colors, th.Dark)
-    st.Cell = st.Cell.Foreground(lipgloss.Color(fgHex))
-    st.Header = st.Header.Foreground(lipgloss.Color(accHex)).Bold(true)
-    selText := bestTextFor(accHex, fgHex, pickBG(th.Colors, th.Dark))
-    st.Selected = st.Selected.Foreground(lipgloss.Color(selText)).Background(lipgloss.Color(accHex))
-    m.table.SetStyles(st)
-    // Agents list setup
-    items := m.agentItems()
-    d := list.NewDefaultDelegate()
-    // Themed delegate styles
-    fgList := pickFG(m.th.Colors, m.th.Dark)
-    accentHex := pickAccent(m.th.Colors, m.th.Dark)
-    d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(lipgloss.Color(fgList))
-    d.Styles.NormalDesc = d.Styles.NormalDesc.Foreground(lipgloss.Color(fgList))
-    // Selected item: accent background with best-contrast text
-    lstSelText := bestTextFor(accentHex, fgList, pickBG(m.th.Colors, m.th.Dark))
-    d.Styles.SelectedTitle = d.Styles.SelectedTitle.
-        Foreground(lipgloss.Color(lstSelText)).
-        Background(lipgloss.Color(accentHex)).
-        BorderForeground(lipgloss.Color(accentHex))
-    d.Styles.SelectedDesc = d.Styles.SelectedDesc.
-        Foreground(lipgloss.Color(lstSelText)).
-        Background(lipgloss.Color(accentHex))
-    lst := list.New(items, d, 40, 10)
-    lst.Title = "Choose agent"
-    lst.SetShowStatusBar(false)
-    lst.SetFilteringEnabled(false)
-    // Themed list styles
-    s := lst.Styles
-    // Themed list UI
-    s.TitleBar = lipgloss.NewStyle() // keep clean background
-    s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
-    s.Spinner = s.Spinner.Foreground(lipgloss.Color(accentHex))
-    s.FilterCursor = s.FilterCursor.Foreground(lipgloss.Color(accentHex))
-    s.FilterPrompt = s.FilterPrompt.Foreground(lipgloss.Color(accentHex))
-    s.DefaultFilterCharacterMatch = s.DefaultFilterCharacterMatch.Foreground(lipgloss.Color(accentHex))
-    s.StatusBar = s.StatusBar.Foreground(lipgloss.Color(fgList))
-    s.StatusEmpty = s.StatusEmpty.Foreground(lipgloss.Color(fgList))
-    s.StatusBarActiveFilter = s.StatusBarActiveFilter.Foreground(lipgloss.Color(accentHex))
-    s.StatusBarFilterCount = s.StatusBarFilterCount.Foreground(lipgloss.Color(fgList))
-    s.NoItems = s.NoItems.Foreground(lipgloss.Color(fgList))
-    s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fgList))
-    s.ActivePaginationDot = s.ActivePaginationDot.Foreground(lipgloss.Color(accentHex))
-    // Inactive dot uses subdued palette color if available
-    inactive := m.th.Colors.Normal["black"]
-    if inactive == "" { inactive = fgList }
-    s.InactivePaginationDot = s.InactivePaginationDot.Foreground(lipgloss.Color(inactive))
-    s.ArabicPagination = s.ArabicPagination.Foreground(lipgloss.Color(inactive))
-    s.DividerDot = s.DividerDot.Foreground(lipgloss.Color(inactive))
-    lst.Styles = s
-    m.agents = lst
+    m.applyThemeToUI()
+    m.setupAgentsList()
+    m.updateTableHeader()
     // Detail viewport init
     vp := viewport.New(60, 12)
     vp.SetContent("")
@@ -146,11 +96,12 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-    // Start async scan
-    return func() tea.Msg {
-        entries, _ := scanner.Scan(m.cfg)
-        return repoListMsg{Entries: entries}
-    }
+    // Start async scan and theme watch (Omarchy)
+    return tea.Batch(
+        func() tea.Msg { entries, _ := scanner.Scan(m.cfg); return repoListMsg{Entries: entries} },
+        themeWatchStartCmd(),
+        themeWatchWaitCmd(),
+    )
 }
 
 type repoListMsg struct{ Entries []scanner.RepoEntry }
@@ -175,6 +126,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         m.repos = orderRepos(msg.Entries, m.sortKey, m.sortAsc)
         m.refreshRows()
         return m, nil
+    case themeTickMsg:
+        // If theme changed, reapply palette
+        if !themesEqual(m.th, msg.Theme) {
+            m.th = msg.Theme
+            m.applyThemeToUI()
+            m.setupAgentsList()
+            m.updateTableHeader()
+        }
+        // Wait for next change
+        return m, themeWatchWaitCmd()
     case detailMsg:
         // Apply some minimal section styling on the first lines
         // First line is name, second path; then sections 'Recent commits' and 'README'
@@ -391,8 +352,8 @@ func (m Model) View() string {
 
     if m.showHelp {
         fmt.Fprintln(&b)
-        fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  ? help  q quit")
-        fmt.Fprintln(&b, "e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents")
+        fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  ? help  q quit")
+        fmt.Fprintln(&b, "e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  Enter details")
     }
     if m.showAgents {
         fmt.Fprintln(&b)
@@ -581,6 +542,103 @@ func scanCmd(cfg config.Config) tea.Cmd {
         return repoListMsg{Entries: entries}
     }
 }
+
+// theme watching via polling
+type themeTickMsg struct{ Theme theme.Theme }
+
+func themeWatchCmd(cfg config.Config) tea.Cmd {
+    return tea.Tick(1500*time.Millisecond, func(time.Time) tea.Msg {
+        th := theme.Detect(cfg.Theme)
+        return themeTickMsg{Theme: th}
+    })
+}
+
+func themesEqual(a, b theme.Theme) bool {
+    if a.Dark != b.Dark { return false }
+    if a.Colors.PrimaryForeground != b.Colors.PrimaryForeground { return false }
+    if a.Colors.PrimaryBackground != b.Colors.PrimaryBackground { return false }
+    // compare a few key normals/bright to detect palette switch
+    keys := []string{"black","red","green","yellow","blue","magenta","cyan","white"}
+    for _, k := range keys {
+        if a.Colors.Normal[k] != b.Colors.Normal[k] { return false }
+        if a.Colors.Bright[k] != b.Colors.Bright[k] { return false }
+    }
+    return true
+}
+
+func (m *Model) applyThemeToUI() {
+    applyThemePalette(m.th.Colors, m.th.Dark)
+    st := table.DefaultStyles()
+    fgHex := pickFG(m.th.Colors, m.th.Dark)
+    accHex := pickAccent(m.th.Colors, m.th.Dark)
+    st.Cell = st.Cell.Foreground(lipgloss.Color(fgHex))
+    st.Header = st.Header.Foreground(lipgloss.Color(accHex)).Bold(true)
+    selText := bestTextFor(accHex, fgHex, pickBG(m.th.Colors, m.th.Dark))
+    st.Selected = st.Selected.Foreground(lipgloss.Color(selText)).Background(lipgloss.Color(accHex))
+    m.table.SetStyles(st)
+}
+
+func (m *Model) setupAgentsList() {
+    items := m.agentItems()
+    d := list.NewDefaultDelegate()
+    fgList := pickFG(m.th.Colors, m.th.Dark)
+    accentHex := pickAccent(m.th.Colors, m.th.Dark)
+    d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(lipgloss.Color(fgList))
+    d.Styles.NormalDesc = d.Styles.NormalDesc.Foreground(lipgloss.Color(fgList))
+    lstSelText := bestTextFor(accentHex, fgList, pickBG(m.th.Colors, m.th.Dark))
+    d.Styles.SelectedTitle = d.Styles.SelectedTitle.
+        Foreground(lipgloss.Color(lstSelText)).
+        Background(lipgloss.Color(accentHex)).
+        BorderForeground(lipgloss.Color(accentHex))
+    d.Styles.SelectedDesc = d.Styles.SelectedDesc.
+        Foreground(lipgloss.Color(lstSelText)).
+        Background(lipgloss.Color(accentHex))
+    lst := list.New(items, d, 40, 10)
+    lst.Title = "Choose agent"
+    lst.SetShowStatusBar(false)
+    lst.SetFilteringEnabled(false)
+    s := lst.Styles
+    s.TitleBar = lipgloss.NewStyle()
+    s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
+    s.Spinner = s.Spinner.Foreground(lipgloss.Color(accentHex))
+    s.FilterCursor = s.FilterCursor.Foreground(lipgloss.Color(accentHex))
+    s.FilterPrompt = s.FilterPrompt.Foreground(lipgloss.Color(accentHex))
+    s.DefaultFilterCharacterMatch = s.DefaultFilterCharacterMatch.Foreground(lipgloss.Color(accentHex))
+    s.StatusBar = s.StatusBar.Foreground(lipgloss.Color(fgList))
+    s.StatusEmpty = s.StatusEmpty.Foreground(lipgloss.Color(fgList))
+    s.StatusBarActiveFilter = s.StatusBarActiveFilter.Foreground(lipgloss.Color(accentHex))
+    s.StatusBarFilterCount = s.StatusBarFilterCount.Foreground(lipgloss.Color(fgList))
+    s.NoItems = s.NoItems.Foreground(lipgloss.Color(fgList))
+    s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fgList))
+    s.ActivePaginationDot = s.ActivePaginationDot.Foreground(lipgloss.Color(accentHex))
+    inactive := m.th.Colors.Normal["black"]
+    if inactive == "" { inactive = fgList }
+    s.InactivePaginationDot = s.InactivePaginationDot.Foreground(lipgloss.Color(inactive))
+    s.ArabicPagination = s.ArabicPagination.Foreground(lipgloss.Color(inactive))
+    s.DividerDot = s.DividerDot.Foreground(lipgloss.Color(inactive))
+    lst.Styles = s
+    m.agents = lst
+}
+
+func (m *Model) updateTableHeader() {
+    // build columns with sort indicator
+    arrow := func(active bool) string {
+        if !active { return "" }
+        if m.sortAsc { return " ▲" }
+        return " ▼"
+    }
+    cols := []table.Column{
+        {Title: "Name", Width: 28},
+        {Title: "State", Width: 7},
+        {Title: "Branch" + arrow(m.sortKey=="branch"), Width: 10},
+        {Title: "Δ", Width: 2},
+        {Title: "A/B" + arrow(m.sortKey=="ab"), Width: 5},
+        {Title: "Last" + arrow(m.sortKey=="last"), Width: 6},
+    }
+    m.table.SetColumns(cols)
+}
+
+func min(a, b int) int { if a<b { return a }; return b }
 
 func loadDetailCmd(r scanner.RepoEntry) tea.Cmd {
     return func() tea.Msg {
