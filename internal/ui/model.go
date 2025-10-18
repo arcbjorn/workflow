@@ -72,33 +72,24 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         filtering:   false,
         showAgents:  false,
     }
-    // Apply theme colors (foreground/background/accent)
-    fg := th.Colors.PrimaryForeground
-    bg := ""
-    if th.Dark {
-        bg = "" // keep terminal background
-    } else {
-        bg = ""
-    }
-    accent := th.Colors.Normal["blue"]
-    if accent == "" { accent = th.Colors.Bright["blue"] }
-    if accent == "" { accent = fg }
-    applyThemeColors(fg, bg, accent)
-    // Style selected row
+    // Apply theme colors from Alacritty palette
+    applyThemePalette(th.Colors, th.Dark)
+    // Table styles from palette
     st := table.DefaultStyles()
-    st.Selected = selectedStyle
+    fgHex := pickFG(th.Colors, th.Dark)
+    accHex := pickAccent(th.Colors, th.Dark)
+    st.Cell = st.Cell.Foreground(lipgloss.Color(fgHex))
+    st.Header = st.Header.Foreground(lipgloss.Color(accHex)).Bold(true)
+    st.Selected = st.Selected.Foreground(lipgloss.Color(pickBG(th.Colors, th.Dark))).Background(lipgloss.Color(accHex))
     m.table.SetStyles(st)
     // Agents list setup
     items := m.agentItems()
     d := list.NewDefaultDelegate()
     // Themed delegate styles
-    fgHex := m.th.Colors.PrimaryForeground
-    if fgHex == "" { if m.th.Dark { fgHex = "#dddddd" } else { fgHex = "#1a1a1a" } }
-    accentHex := m.th.Colors.Normal["blue"]
-    if accentHex == "" { accentHex = m.th.Colors.Bright["blue"] }
-    if accentHex == "" { if m.th.Dark { accentHex = "#8ab4f8" } else { accentHex = "#1a73e8" } }
-    d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(lipgloss.Color(fgHex))
-    d.Styles.NormalDesc = d.Styles.NormalDesc.Foreground(lipgloss.Color(fgHex))
+    fgList := pickFG(m.th.Colors, m.th.Dark)
+    accentHex := pickAccent(m.th.Colors, m.th.Dark)
+    d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(lipgloss.Color(fgList))
+    d.Styles.NormalDesc = d.Styles.NormalDesc.Foreground(lipgloss.Color(fgList))
     d.Styles.SelectedTitle = d.Styles.SelectedTitle.
         Foreground(lipgloss.Color(accentHex)).
         BorderForeground(lipgloss.Color(accentHex))
@@ -109,10 +100,12 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
     lst.SetFilteringEnabled(false)
     // Themed list styles
     s := lst.Styles
-    // Override Title to avoid default background
+    // Themed list UI
     s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
     s.FilterCursor = s.FilterCursor.Foreground(lipgloss.Color(accentHex))
     s.FilterPrompt = s.FilterPrompt.Foreground(lipgloss.Color(accentHex))
+    s.NoItems = s.NoItems.Foreground(lipgloss.Color(fgList))
+    s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fgList))
     lst.Styles = s
     m.agents = lst
     return m
@@ -282,7 +275,9 @@ func (m Model) View() string {
         title += fmt.Sprintf("  [/%s]", m.filter)
     }
     fmt.Fprintln(&b, titleStyle.Render(title))
-    fmt.Fprintln(&b, strings.Repeat("─", max(10, m.width)))
+    // separator styled with a subtle theme foreground
+    sep := strings.Repeat("─", max(10, m.width))
+    fmt.Fprintln(&b, headerStyle.Faint(true).Render(sep))
 
     if !m.reposLoaded {
         fmt.Fprintln(&b, "loading repos…")
@@ -300,7 +295,7 @@ func (m Model) View() string {
 
     if m.status != "" {
         fmt.Fprintln(&b)
-        fmt.Fprintln(&b, m.status)
+        fmt.Fprintln(&b, statusStyle.Render(m.status))
     }
 
     if m.showHelp {
