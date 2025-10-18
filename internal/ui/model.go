@@ -10,6 +10,7 @@ import (
     tea "github.com/charmbracelet/bubbletea"
     "github.com/charmbracelet/bubbles/table"
     "github.com/charmbracelet/bubbles/textinput"
+    "github.com/charmbracelet/bubbles/list"
     "workflow/internal/config"
     "workflow/internal/run"
     "workflow/internal/scanner"
@@ -38,6 +39,8 @@ type Model struct {
     table     table.Model
     input     textinput.Model
     filtering bool
+    showAgents bool
+    agents     list.Model
 }
 
 func NewModel(cfg config.Config, th theme.Theme) Model {
@@ -54,7 +57,7 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
     ti := textinput.New()
     ti.Placeholder = "type to filter; Enter apply, Esc cancel"
     ti.CharLimit = 64
-    return Model{
+    m := Model{
         showHelp:    true,
         reposLoaded: false,
         repos:       []scanner.RepoEntry{},
@@ -66,7 +69,16 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         table:       t,
         input:       ti,
         filtering:   false,
+        showAgents:  false,
     }
+    // Agents list setup
+    items := m.agentItems()
+    lst := list.New(items, list.NewDefaultDelegate(), 40, 10)
+    lst.Title = "Choose agent"
+    lst.SetShowStatusBar(false)
+    lst.SetFilteringEnabled(false)
+    m.agents = lst
+    return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -87,6 +99,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         h := m.height - 6
         if h < 5 { h = 5 }
         m.table.SetHeight(h)
+        // Resize agents list as overlay
+        m.agents.SetSize(min(60, m.width-4), min(12, m.height-6))
         return m, nil
 
     case repoListMsg:
@@ -96,6 +110,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         return m, nil
 
     case tea.KeyMsg:
+        if m.showAgents {
+            switch msg.String() {
+            case "esc", "q":
+                m.showAgents = false
+                m.status = ""
+                return m, nil
+            case "enter":
+                if it, ok := m.agents.SelectedItem().(agentItem); ok {
+                    path := m.currentPath()
+                    if path == "" { m.status = "no selection"; m.showAgents = false; return m, nil }
+                    if err := run.LaunchAgentNewWindow(path, it.name, m.cfg); err != nil {
+                        m.status = "agent: " + err.Error()
+                    } else {
+                        m.status = "agent launched: " + it.name
+                    }
+                    m.showAgents = false
+                    return m, nil
+                }
+            }
+            var cmd tea.Cmd
+            m.agents, cmd = m.agents.Update(msg)
+            return m, cmd
+        }
         if m.filtering {
             switch msg.Type {
             case tea.KeyEsc:
@@ -175,7 +212,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             go func() { _ = exec.Command("git", "-C", path, "fetch", "--all", "--prune").Run() }()
             return m, nil
         case "a":
-            m.status = "agents picker — TODO"
+            m.showAgents = true
+            // Rebuild items in case config changed while running
+            m.agents.SetItems(m.agentItems())
+            m.status = ""
             return m, nil
         case "A":
             path := m.currentPath()
@@ -230,6 +270,10 @@ func (m Model) View() string {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  ? help  q quit")
         fmt.Fprintln(&b, "e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents")
+    }
+    if m.showAgents {
+        fmt.Fprintln(&b)
+        fmt.Fprintln(&b, m.agents.View())
     }
     return b.String()
 }
@@ -322,6 +366,43 @@ func (m *Model) refreshRows() {
         m.visible = append(m.visible, i)
     }
     m.table.SetRows(rows)
+}
+
+type agentItem struct{
+    name string
+    cmd  string
+    def  bool
+}
+
+func (a agentItem) Title() string {
+    if a.def { return a.name + " (default)" }
+    return a.name
+}
+func (a agentItem) Description() string { return a.cmd }
+func (a agentItem) FilterValue() string { return a.name + " " + a.cmd }
+
+func (m *Model) agentItems() []list.Item {
+    items := []list.Item{}
+    // stable order: default first, then alphabetical others
+    keys := make([]string, 0, len(m.cfg.Agents.Map))
+    for k := range m.cfg.Agents.Map { keys = append(keys, k) }
+    sort.Strings(keys)
+    def := m.cfg.Agents.Default
+    if def != "" {
+        cmd := m.cfg.Agents.Map[def]
+        if cmd == "" { cmd = def }
+        items = append(items, agentItem{name: def, cmd: cmd, def: true})
+        // remove def from keys if present
+        out := keys[:0]
+        for _, k := range keys { if k != def { out = append(out, k) } }
+        keys = out
+    }
+    for _, k := range keys {
+        cmd := m.cfg.Agents.Map[k]
+        if cmd == "" { cmd = k }
+        items = append(items, agentItem{name: k, cmd: cmd})
+    }
+    return items
 }
 
 func scanCmd(cfg config.Config) tea.Cmd {
