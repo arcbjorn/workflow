@@ -18,6 +18,7 @@ import (
     "workflow/internal/config"
     "workflow/internal/run"
     "workflow/internal/scanner"
+    "workflow/internal/gitutil"
     "workflow/internal/theme"
     "workflow/internal/tasks"
 )
@@ -427,6 +428,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.status = "fetching…"
             go func() { _ = exec.Command("git", "-C", path, "fetch", "--all", "--prune").Run() }()
             return m, nil
+        case "y":
+            // copy path
+            p := m.currentPath()
+            if p == "" { m.status = "no selection"; return m, nil }
+            if err := copyClipboard(p); err != nil { m.status = "copy: " + err.Error() } else { m.status = "copied path" }
+            return m, nil
+        case "u":
+            // open remote URL
+            p := m.currentPath()
+            if p == "" { m.status = "no selection"; return m, nil }
+            url, err := gitutil.RemoteURL(p)
+            if err != nil || url == "" { m.status = "no remote"; return m, nil }
+            _ = exec.Command("xdg-open", url).Start()
+            m.status = "opened remote"
+            return m, nil
+        case "Y":
+            // copy remote URL
+            p := m.currentPath()
+            if p == "" { m.status = "no selection"; return m, nil }
+            url, err := gitutil.RemoteURL(p)
+            if err != nil || url == "" { m.status = "no remote"; return m, nil }
+            if err := copyClipboard(url); err != nil { m.status = "copy: " + err.Error() } else { m.status = "copied URL" }
+            return m, nil
         case "a":
             m.showAgents = true
             // Rebuild items in case config changed while running
@@ -506,20 +530,15 @@ func (m Model) View() string {
         fmt.Fprintln(&b, statusStyle.Render(stats))
     }
 
-    if m.showHelp {
+    overlayOpen := m.showAgents || m.showTasks || m.showDetail
+    if m.showHelp && !overlayOpen {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  m group  x expand  ? help  q quit")
-        fmt.Fprintln(&b, "Enter details  r tasks  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents")
+        fmt.Fprintln(&b, "Enter details  r tasks  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  y copy  u open URL  Y copy URL")
         // badges legend
         fmt.Fprintln(&b)
         legend := fmt.Sprintf("Badges: [%s dirty] [%s conflicts] [%s ahead] [%s behind] [%s detached] [%s parent] [%s pkg]",
-            colorBadge("*", m.th, "yellow"),
-            colorBadge("‼", m.th, "red"),
-            colorBadge("⇡", m.th, "green"),
-            colorBadge("⇣", m.th, "magenta"),
-            colorBadge("det", m.th, "cyan"),
-            colorBadge("mono", m.th, "blue"),
-            colorBadge("pkg", m.th, "blue"),
+            "*", "‼", "⇡", "⇣", "det", "mono", "pkg",
         )
         fmt.Fprintln(&b, legend)
     }
@@ -657,7 +676,7 @@ func (m *Model) refreshRows() {
             }
             dirty := ""
             isSel := rowNo == sel
-            if r.Dirty && !isSel { dirty = colorBadge("*", m.th, "yellow") }
+            if r.Dirty { dirty = "*" }
             ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
             state := bucket(r.LastAge)
             name := m.renderNameSelected(r, "", isSel)
@@ -687,7 +706,7 @@ func (m *Model) refreshRows() {
             }
             dirty := ""
             isSel := rowNo == sel
-            if r.Dirty && !isSel { dirty = colorBadge("*", m.th, "yellow") }
+            if r.Dirty { dirty = "*" }
             ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
             state := bucket(r.LastAge)
             name := m.renderNameSelected(r, indent, isSel)
@@ -728,24 +747,13 @@ func (m *Model) renderNameSelected(r scanner.RepoEntry, indent string, selected 
     if name := m.overrideName(r.Path); name != "" { base = name }
     // colorized badges
     var parts []string
-    if !selected {
-        if r.Dirty { parts = append(parts, colorBadge("*", m.th, "yellow")) }
-        if r.Conflicts > 0 { parts = append(parts, colorBadge("‼", m.th, "red")) }
-        if r.Ahead > 0 { parts = append(parts, colorBadge("⇡", m.th, "green")) }
-        if r.Behind > 0 { parts = append(parts, colorBadge("⇣", m.th, "magenta")) }
-        if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { parts = append(parts, colorBadge("det", m.th, "cyan")) }
-        if r.Monorepo { parts = append(parts, colorBadge("mono", m.th, "blue")) }
-        if r.WorkspacePkg { parts = append(parts, colorBadge("pkg", m.th, "blue")) }
-    } else {
-        // Plain badges on selected rows to avoid breaking highlight
-        if r.Dirty { parts = append(parts, "*") }
-        if r.Conflicts > 0 { parts = append(parts, "‼") }
-        if r.Ahead > 0 { parts = append(parts, "⇡") }
-        if r.Behind > 0 { parts = append(parts, "⇣") }
-        if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { parts = append(parts, "det") }
-        if r.Monorepo { parts = append(parts, "mono") }
-        if r.WorkspacePkg { parts = append(parts, "pkg") }
-    }
+    if r.Dirty { parts = append(parts, "*") }
+    if r.Conflicts > 0 { parts = append(parts, "‼") }
+    if r.Ahead > 0 { parts = append(parts, "⇡") }
+    if r.Behind > 0 { parts = append(parts, "⇣") }
+    if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { parts = append(parts, "det") }
+    if r.Monorepo { parts = append(parts, "mono") }
+    if r.WorkspacePkg { parts = append(parts, "pkg") }
     if len(parts) > 0 {
         return indent + fmt.Sprintf("%s [%s]", base, strings.Join(parts, ""))
     }
@@ -1026,12 +1034,13 @@ func (m *Model) updateTableHeight() {
     overhead += 2
     // Filter input
     if m.filtering { overhead += 2 }
+    overlayOpen := m.showAgents || m.showTasks || m.showDetail
     // Status line
-    if m.status != "" { overhead += 2 }
+    if m.status != "" && !overlayOpen { overhead += 2 }
     // Stats bar (shown when reposLoaded)
-    if m.reposLoaded { overhead += 2 }
+    if m.reposLoaded && !overlayOpen { overhead += 2 }
     // Help + legend (approx)
-    if m.showHelp { overhead += 5 }
+    if m.showHelp && !overlayOpen { overhead += 5 }
     // Overlays
     if m.showAgents {
         h := m.agents.Height()
