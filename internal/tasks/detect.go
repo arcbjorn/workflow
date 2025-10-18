@@ -6,6 +6,9 @@ import (
     "path/filepath"
     "sort"
     "strings"
+
+    toml "github.com/pelletier/go-toml/v2"
+    yaml "gopkg.in/yaml.v3"
 )
 
 type Task struct {
@@ -24,6 +27,12 @@ func Detect(path string) []Task {
     out = append(out, goTasks(path)...)
     // makefile
     out = append(out, makeTasks(path)...)
+    // justfile
+    out = append(out, justTasks(path)...)
+    // Taskfile (go-task)
+    out = append(out, taskfileTasks(path)...)
+    // Python common tools
+    out = append(out, pythonTasks(path)...)
     // scripts directory
     out = append(out, scriptDirTasks(path)...)
     // de-dup by name+cmd
@@ -174,4 +183,82 @@ func firstExisting(base string, names ...string) string {
         if exists(p) { return p }
     }
     return ""
+}
+
+// Justfile recipes
+func justTasks(path string) []Task {
+    jf := firstExisting(path, "Justfile", "justfile")
+    if jf == "" { return nil }
+    data, err := os.ReadFile(jf)
+    if err != nil { return nil }
+    lines := strings.Split(string(data), "\n")
+    var out []Task
+    for _, ln := range lines {
+        ln = strings.TrimSpace(ln)
+        if ln == "" || strings.HasPrefix(ln, "#") { continue }
+        if i := strings.Index(ln, ":"); i > 0 {
+            name := ln[:i]
+            if strings.Contains(name, " ") || strings.Contains(name, ".") { continue }
+            out = append(out, Task{Name: name, Cmd: "just "+name, Src: "just"})
+        }
+    }
+    return out
+}
+
+// Taskfile (go-task)
+func taskfileTasks(path string) []Task {
+    p := firstExisting(path, "Taskfile.yml", "Taskfile.yaml")
+    if p == "" { return nil }
+    b, err := os.ReadFile(p)
+    if err != nil { return nil }
+    var y map[string]any
+    if err := yaml.Unmarshal(b, &y); err != nil { return nil }
+    tasks, _ := y["tasks"].(map[string]any)
+    if tasks == nil { return nil }
+    names := make([]string, 0, len(tasks))
+    for k := range tasks { names = append(names, k) }
+    sort.Strings(names)
+    out := make([]Task, 0, len(names))
+    for _, n := range names {
+        out = append(out, Task{Name: n, Cmd: "task "+n, Src: "taskfile"})
+    }
+    return out
+}
+
+// Python tools based on pyproject/pytest/tox
+func pythonTasks(path string) []Task {
+    var out []Task
+    pp := filepath.Join(path, "pyproject.toml")
+    if b, err := os.ReadFile(pp); err == nil {
+        var t map[string]any
+        if err := toml.Unmarshal(b, &t); err == nil {
+            if proj, ok := t["project"].(map[string]any); ok {
+                if scripts, ok := proj["scripts"].(map[string]any); ok {
+                    for name := range scripts {
+                        out = append(out, Task{Name: name, Cmd: "python -m "+name, Src: "python"})
+                    }
+                }
+            }
+            if tool, ok := t["tool"].(map[string]any); ok {
+                if poetry, ok := tool["poetry"].(map[string]any); ok {
+                    if scripts, ok := poetry["scripts"].(map[string]any); ok {
+                        for name := range scripts {
+                            out = append(out, Task{Name: name, Cmd: "poetry run "+name, Src: "poetry"})
+                        }
+                    }
+                    out = append(out, Task{Name: "test", Cmd: "poetry run pytest", Src: "poetry"})
+                }
+                if _, ok := tool["hatch"].(map[string]any); ok {
+                    out = append(out, Task{Name: "test", Cmd: "hatch run test", Src: "hatch"})
+                }
+            }
+        }
+    }
+    if exists(filepath.Join(path, "tox.ini")) {
+        out = append(out, Task{Name: "tox", Cmd: "tox", Src: "tox"})
+    }
+    if exists(filepath.Join(path, "pytest.ini")) || exists(filepath.Join(path, "conftest.py")) {
+        out = append(out, Task{Name: "pytest", Cmd: "pytest", Src: "pytest"})
+    }
+    return out
 }
