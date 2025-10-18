@@ -46,6 +46,10 @@ type Model struct {
     // Detail overlay
     showDetail bool
     detail     viewport.Model
+
+    // Sorting
+    sortKey string // last|ab|branch
+    sortAsc bool
 }
 
 func NewModel(cfg config.Config, th theme.Theme) Model {
@@ -75,6 +79,8 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         input:       ti,
         filtering:   false,
         showAgents:  false,
+        sortKey:     "last",
+        sortAsc:     false,
     }
     // Apply theme colors from Alacritty palette
     applyThemePalette(th.Colors, th.Dark)
@@ -166,7 +172,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
     case repoListMsg:
         m.reposLoaded = true
-        m.repos = orderRepos(msg.Entries)
+        m.repos = orderRepos(msg.Entries, m.sortKey, m.sortAsc)
         m.refreshRows()
         return m, nil
     case detailMsg:
@@ -262,6 +268,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "R":
             m.status = "refreshing…"
             return m, scanCmd(m.cfg)
+        case "s":
+            // Cycle sort key: last -> ab -> branch -> last
+            switch m.sortKey {
+            case "last":
+                m.sortKey = "ab"
+            case "ab":
+                m.sortKey = "branch"
+            default:
+                m.sortKey = "last"
+            }
+            m.repos = orderRepos(m.repos, m.sortKey, m.sortAsc)
+            m.refreshRows()
+            m.status = "sort: " + m.sortKey + map[bool]string{true:" asc", false:" desc"}[m.sortAsc]
+            return m, nil
+        case "S":
+            m.sortAsc = !m.sortAsc
+            m.repos = orderRepos(m.repos, m.sortKey, m.sortAsc)
+            m.refreshRows()
+            m.status = "sort: " + m.sortKey + map[bool]string{true:" asc", false:" desc"}[m.sortAsc]
+            return m, nil
         case "e":
             path := m.currentPath()
             if path == "" { m.status = "no selection"; return m, nil }
@@ -420,14 +446,43 @@ func (m Model) currentPath() string {
     return m.repos[ri].Path
 }
 
-func orderRepos(in []scanner.RepoEntry) []scanner.RepoEntry {
+func orderRepos(in []scanner.RepoEntry, key string, asc bool) []scanner.RepoEntry {
     out := append([]scanner.RepoEntry(nil), in...)
-    // Dirty first, then most recent activity
+    // stable sort: primary comparator by key, then fallback by name
     sort.SliceStable(out, func(i, j int) bool {
-        if out[i].Dirty != out[j].Dirty {
+        // Always keep dirty first when sorting by recency/ab; for branch, do not force dirty grouping
+        if key != "branch" && out[i].Dirty != out[j].Dirty {
             return out[i].Dirty && !out[j].Dirty
         }
-        return ageScore(out[i].LastAge) < ageScore(out[j].LastAge)
+        var less bool
+        switch key {
+        case "ab":
+            ai := out[i].Ahead + out[i].Behind
+            aj := out[j].Ahead + out[j].Behind
+            if ai == aj {
+                less = out[i].Name < out[j].Name
+            } else {
+                less = ai < aj
+            }
+        case "branch":
+            if out[i].Branch == out[j].Branch {
+                less = out[i].Name < out[j].Name
+            } else {
+                less = out[i].Branch < out[j].Branch
+            }
+        default: // "last"
+            ai := ageScore(out[i].LastAge)
+            aj := ageScore(out[j].LastAge)
+            if ai == aj {
+                less = out[i].Name < out[j].Name
+            } else {
+                less = ai < aj
+            }
+        }
+        if asc {
+            return less
+        }
+        return !less
     })
     return out
 }
@@ -466,7 +521,18 @@ func (m *Model) refreshRows() {
         if r.Dirty { dirty = "*" }
         ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
         state := bucket(r.LastAge)
-        rows = append(rows, table.Row{r.Name, state, r.Branch, dirty, ab, r.LastAge})
+        // Name with badges
+        name := r.Name
+        badges := []string{}
+        if r.Dirty { badges = append(badges, "*") }
+        if r.Conflicts > 0 { badges = append(badges, "‼") }
+        if r.Ahead > 0 { badges = append(badges, "⇡") }
+        if r.Behind > 0 { badges = append(badges, "⇣") }
+        if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { badges = append(badges, "det") }
+        if len(badges) > 0 {
+            name = fmt.Sprintf("%s [%s]", name, strings.Join(badges, ""))
+        }
+        rows = append(rows, table.Row{name, state, r.Branch, dirty, ab, r.LastAge})
         m.visible = append(m.visible, i)
     }
     m.table.SetRows(rows)
