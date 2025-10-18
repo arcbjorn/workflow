@@ -41,6 +41,23 @@ type Config struct {
 
     // Cache TTL in seconds for repo discovery (filesystem walking), not git status.
     CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
+
+    // Badge color overrides: map badge -> palette key (e.g., "blue") or hex ("#rrggbb").
+    // Known badges: dirty, conflicts, ahead, behind, detached, mono, pkg
+    BadgeColors map[string]string `yaml:"badge_colors"`
+
+    // Optional key remapping for common actions.
+    Keys Keymap `yaml:"keys"`
+}
+
+type Keymap struct {
+    Group       string `yaml:"group"`
+    Expand      string `yaml:"expand"`
+    Refresh     string `yaml:"refresh"`
+    Sort        string `yaml:"sort"`
+    SortReverse string `yaml:"sort_reverse"`
+    Details     string `yaml:"details"`
+    Tasks       string `yaml:"tasks"`
 }
 
 type RepoOverride struct {
@@ -70,6 +87,10 @@ func Default() Config {
         Theme: "auto",
         Overrides: map[string]RepoOverride{},
         CacheTTLSeconds: 120,
+        BadgeColors: map[string]string{},
+        Keys: Keymap{
+            Group: "m", Expand: "x", Refresh: "R", Sort: "s", SortReverse: "S", Details: "enter", Tasks: "r",
+        },
     }
 }
 
@@ -119,6 +140,15 @@ func Load() (Config, error) {
     if user.Theme != "" { merge.Theme = user.Theme }
     if len(user.Overrides) > 0 { merge.Overrides = user.Overrides }
     if user.CacheTTLSeconds != 0 { merge.CacheTTLSeconds = user.CacheTTLSeconds }
+    if len(user.BadgeColors) > 0 { merge.BadgeColors = user.BadgeColors }
+    // merge keys individually so partial maps work
+    if user.Keys.Group != "" { merge.Keys.Group = user.Keys.Group }
+    if user.Keys.Expand != "" { merge.Keys.Expand = user.Keys.Expand }
+    if user.Keys.Refresh != "" { merge.Keys.Refresh = user.Keys.Refresh }
+    if user.Keys.Sort != "" { merge.Keys.Sort = user.Keys.Sort }
+    if user.Keys.SortReverse != "" { merge.Keys.SortReverse = user.Keys.SortReverse }
+    if user.Keys.Details != "" { merge.Keys.Details = user.Keys.Details }
+    if user.Keys.Tasks != "" { merge.Keys.Tasks = user.Keys.Tasks }
     return merge, nil
 }
 
