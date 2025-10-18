@@ -16,7 +16,8 @@ func OpenTerminalNewWindow(cwd string, cfg config.Config) error {
         if !agents.HasBinary("alacritty") {
             return fmt.Errorf("alacritty not found")
         }
-        cmd := exec.Command("alacritty", agents.BuildAlacrittyArgs(cwd, cfg.Terminal.InPlaceShell+" -lc \"$SHELL\"")...)
+        // Let Alacritty start the user's default shell; no -e override
+        cmd := exec.Command("alacritty", "--working-directory", cwd)
         return cmd.Start()
     default:
         return fmt.Errorf("unsupported terminal: %s", term)
