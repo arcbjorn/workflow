@@ -22,6 +22,7 @@ type RepoEntry struct {
     Dirty   bool
     Conflicts int
     LastAge string // e.g., 3d, 5h, 2mo
+    Detached bool
 }
 
 // Scan finds git repos under roots (depth-limited) and collects status.
@@ -153,6 +154,10 @@ func parseStatus(path string) (branch string, ahead, behind int, dirty bool, con
         line := s.Text()
         if strings.HasPrefix(line, "# branch.head ") {
             branch = strings.TrimSpace(strings.TrimPrefix(line, "# branch.head "))
+            // Detect detached state reported as "(detached)"
+            if branch == "(detached)" {
+                // keep label for caller to mark as detached
+            }
         } else if strings.HasPrefix(line, "# branch.ab ") {
             // format: # branch.ab +A -B
             parts := strings.Fields(line)
