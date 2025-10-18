@@ -12,6 +12,7 @@ import (
     "github.com/charmbracelet/bubbles/table"
     "github.com/charmbracelet/bubbles/textinput"
     "github.com/charmbracelet/bubbles/list"
+    "github.com/charmbracelet/bubbles/spinner"
     "github.com/charmbracelet/bubbles/viewport"
     "github.com/charmbracelet/lipgloss"
     "workflow/internal/config"
@@ -64,6 +65,9 @@ type Model struct {
     curTasks  []tasks.Task
     // Scan busy state
     scanning bool
+
+    // Spinner for scanning
+    spin spinner.Model
 }
 
 func NewModel(cfg config.Config, th theme.Theme) Model {
@@ -98,6 +102,11 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         grouped:     false,
         expanded:    map[string]bool{},
     }
+    // Spinner init
+    sp := spinner.New()
+    sp.Spinner = spinner.MiniDot
+    sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(pickAccent(th.Colors, th.Dark)))
+    m.spin = sp
     m.applyThemeToUI()
     m.setupAgentsList()
     m.updateTableHeader()
@@ -123,6 +132,10 @@ type startScanMsg struct{}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     switch msg := msg.(type) {
+    case spinner.TickMsg:
+        var cmd tea.Cmd
+        m.spin, cmd = m.spin.Update(msg)
+        return m, cmd
     case tea.WindowSizeMsg:
         m.width = msg.Width
         m.height = msg.Height
@@ -146,7 +159,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.scanning { return m, nil }
         m.scanning = true
         m.status = "scanning…"
-        return m, scanCmd(m.cfg)
+        return m, tea.Batch(scanCmd(m.cfg), m.spin.Tick)
     case themeTickMsg:
         // If theme changed, reapply palette
         if !themesEqual(m.th, msg.Theme) {
@@ -308,7 +321,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "R":
             if m.scanning { m.status = "already scanning"; return m, nil }
             m.status = "refreshing…"
-            return m, scanCmd(m.cfg)
+            return m, tea.Batch(scanCmd(m.cfg), m.spin.Tick)
         case "r":
             // Open tasks picker for current repo
             path := m.currentPath()
@@ -456,7 +469,12 @@ func (m Model) View() string {
 
     if m.status != "" {
         fmt.Fprintln(&b)
-        fmt.Fprintln(&b, statusStyle.Render(m.status))
+        if m.scanning {
+            line := m.spin.View() + " " + m.status
+            fmt.Fprintln(&b, statusStyle.Render(line))
+        } else {
+            fmt.Fprintln(&b, statusStyle.Render(m.status))
+        }
     }
 
     if m.showHelp {
@@ -595,7 +613,7 @@ func (m *Model) refreshRows() {
                 }
             }
             dirty := ""
-            if r.Dirty { dirty = "*" }
+            if r.Dirty { dirty = colorBadge("*", m.th, "yellow") }
             ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
             state := bucket(r.LastAge)
             name := m.renderName(r, "")
@@ -623,7 +641,7 @@ func (m *Model) refreshRows() {
                 }
             }
             dirty := ""
-            if r.Dirty { dirty = "*" }
+            if r.Dirty { dirty = colorBadge("*", m.th, "yellow") }
             ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
             state := bucket(r.LastAge)
             name := m.renderName(r, indent)
@@ -660,18 +678,26 @@ func (m *Model) renderName(r scanner.RepoEntry, indent string) string {
     if r.WorkspacePkg && r.PackageName != "" { base = r.PackageName }
     // override display name from config
     if name := m.overrideName(r.Path); name != "" { base = name }
-    badges := []string{}
-    if r.Dirty { badges = append(badges, "*") }
-    if r.Conflicts > 0 { badges = append(badges, "‼") }
-    if r.Ahead > 0 { badges = append(badges, "⇡") }
-    if r.Behind > 0 { badges = append(badges, "⇣") }
-    if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { badges = append(badges, "det") }
-    if r.Monorepo { badges = append(badges, "mono") }
-    if r.WorkspacePkg { badges = append(badges, "pkg") }
-    if len(badges) > 0 {
-        return indent + fmt.Sprintf("%s [%s]", base, strings.Join(badges, ""))
+    // colorized badges
+    var parts []string
+    if r.Dirty { parts = append(parts, colorBadge("*", m.th, "yellow")) }
+    if r.Conflicts > 0 { parts = append(parts, colorBadge("‼", m.th, "red")) }
+    if r.Ahead > 0 { parts = append(parts, colorBadge("⇡", m.th, "green")) }
+    if r.Behind > 0 { parts = append(parts, colorBadge("⇣", m.th, "magenta")) }
+    if strings.HasPrefix(strings.ToLower(r.Branch), "(detached)") { parts = append(parts, colorBadge("det", m.th, "cyan")) }
+    if r.Monorepo { parts = append(parts, colorBadge("mono", m.th, "blue")) }
+    if r.WorkspacePkg { parts = append(parts, colorBadge("pkg", m.th, "blue")) }
+    if len(parts) > 0 {
+        return indent + fmt.Sprintf("%s [%s]", base, strings.Join(parts, ""))
     }
     return indent + base
+}
+
+func colorBadge(s string, th theme.Theme, key string) string {
+    hex := th.Colors.Normal[key]
+    if hex == "" { hex = th.Colors.Bright[key] }
+    if hex == "" { hex = pickAccent(th.Colors, th.Dark) }
+    return lipgloss.NewStyle().Foreground(lipgloss.Color(hex)).Render(s)
 }
 
 func (m *Model) isHidden(path string) bool {
