@@ -15,6 +15,7 @@ import (
     "github.com/charmbracelet/bubbles/spinner"
     "github.com/charmbracelet/bubbles/viewport"
     "github.com/charmbracelet/lipgloss"
+    "github.com/charmbracelet/glamour"
     "workflow/internal/config"
     "workflow/internal/run"
     "workflow/internal/scanner"
@@ -50,6 +51,7 @@ type Model struct {
     // Detail overlay
     showDetail bool
     detail     viewport.Model
+    mdEnabled bool
 
     // Sorting
     sortKey string // last|ab|branch
@@ -186,6 +188,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     case detailMsg:
         // Apply some minimal section styling on the first lines
         // First line is name, second path; then sections 'Recent commits' and 'README'
+        if m.mdEnabled {
+            // Render README (if present) in Markdown
+            content, ok := scanner.ReadmeContent(m.currentPath(), 1<<20)
+            if ok {
+                style := "dark"
+                if !m.th.Dark { style = "light" }
+                r, _ := glamour.NewTermRenderer(
+                    glamour.WithAutoStyle(),
+                    glamour.WithWordWrap(m.detail.Width),
+                    glamour.WithEnvironmentConfig(),
+                    glamour.WithStylePath(style),
+                )
+                if out, err := r.Render(content); err == nil {
+                    m.detail.SetContent(out)
+                    return m, nil
+                }
+            }
+        }
         lines := strings.Split(msg.Text, "\n")
         if len(lines) > 0 {
             lines[0] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render(lines[0])
@@ -228,6 +248,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             case "q", "esc", "enter":
                 m.showDetail = false
                 return m, nil
+            case "M":
+                // Toggle Markdown rendering for README while in details
+                m.mdEnabled = !m.mdEnabled
+                if len(m.visible) == 0 { return m, nil }
+                idx := m.table.Cursor()
+                if idx < 0 || idx >= len(m.visible) { return m, nil }
+                ri := m.visible[idx]
+                if ri < 0 || ri >= len(m.repos) { return m, nil }
+                return m, loadDetailCmd(m.repos[ri])
             }
             var cmd tea.Cmd
             m.detail, cmd = m.detail.Update(msg)
@@ -328,6 +357,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.showDetail = true
             m.status = ""
             return m, loadDetailCmd(m.repos[ri])
+        case "M":
+            // Toggle markdown rendering of README in details
+            m.mdEnabled = !m.mdEnabled
+            if m.showDetail {
+                // retrigger detail load
+                if len(m.visible) == 0 { return m, nil }
+                idx := m.table.Cursor()
+                if idx < 0 || idx >= len(m.visible) { return m, nil }
+                ri := m.visible[idx]
+                if ri < 0 || ri >= len(m.repos) { return m, nil }
+                return m, loadDetailCmd(m.repos[ri])
+            }
+            return m, nil
         case "/":
             m.filtering = true
             m.input.SetValue(m.filter)
@@ -534,7 +576,7 @@ func (m Model) View() string {
     if m.showHelp && !overlayOpen {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  m group  x expand  ? help  q quit")
-        fmt.Fprintln(&b, "Enter details  r tasks  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  y copy  u open URL  Y copy URL")
+        fmt.Fprintln(&b, "Enter details  M toggle README MD  r tasks  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  y copy  u open URL  Y copy URL")
         // badges legend
         fmt.Fprintln(&b)
         legend := fmt.Sprintf("Badges: [%s dirty] [%s conflicts] [%s ahead] [%s behind] [%s detached] [%s parent] [%s pkg]",
