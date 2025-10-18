@@ -149,7 +149,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             lines[0] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render(lines[0])
         }
         for i, ln := range lines {
-            if ln == "Recent commits" || ln == "README" {
+            if ln == "Tasks (press r to run)" || ln == "Recent commits" || ln == "README" {
                 lines[i] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render(ln)
             }
         }
@@ -408,7 +408,7 @@ func (m Model) View() string {
     if m.showHelp {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  ? help  q quit")
-        fmt.Fprintln(&b, "e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  Enter details")
+        fmt.Fprintln(&b, "Enter details  r tasks  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents")
     }
     if m.showAgents {
         fmt.Fprintln(&b)
@@ -715,6 +715,22 @@ func loadDetailCmd(r scanner.RepoEntry) tea.Cmd {
         fmt.Fprintf(&sb, "Ahead/Behind: %d/%d\n", r.Ahead, r.Behind)
         fmt.Fprintf(&sb, "Dirty: %v  Conflicts: %d\n", r.Dirty, r.Conflicts)
         fmt.Fprintf(&sb, "Last: %s\n", r.LastAge)
+        // Tasks preview
+        fmt.Fprintln(&sb)
+        fmt.Fprintln(&sb, "Tasks (press r to run)")
+        ts := tasks.Detect(r.Path)
+        if len(ts) == 0 {
+            fmt.Fprintln(&sb, "(none)")
+        } else {
+            max := 8
+            if len(ts) < max { max = len(ts) }
+            for i := 0; i < max; i++ {
+                fmt.Fprintf(&sb, "• %s — %s\n", ts[i].Name, ts[i].Cmd)
+            }
+            if len(ts) > max {
+                fmt.Fprintf(&sb, "… and %d more\n", len(ts)-max)
+            }
+        }
         // Recent commits
         fmt.Fprintln(&sb)
         fmt.Fprintln(&sb, "Recent commits")
