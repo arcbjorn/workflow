@@ -43,7 +43,8 @@ func Scan(cfg config.Config) ([]RepoEntry, error) {
     var repos []string
     // Try cache first
     cd, _ := cache.Load()
-    ttl := 120 * time.Second
+    ttl := time.Duration(cfg.CacheTTLSeconds) * time.Second
+    if ttl <= 0 { ttl = 120 * time.Second }
     for _, root := range roots {
         cached := cache.GetRepos(cd, root, ttl)
         if len(cached) > 0 {
