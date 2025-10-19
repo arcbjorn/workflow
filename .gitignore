@@ -5,6 +5,8 @@
 *.so
 *.dylib
 /workflow
+bin/
+docs/
 
 # Test binary, built with `go test -c`
 *.test
@@ -51,3 +53,20 @@ tmp/
 # Build artifacts
 dist/
 build/
+
+# Local configuration and state
+*.local
+.env
+.env.local
+.env.*.local
+
+# Go build cache
+.cache/
+*.cache
+
+# Local state files (workflow uses ~/.local/state/workflow)
+.local/
+
+# Editor backup files
+*.bak
+*.backup
