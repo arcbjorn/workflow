@@ -54,6 +54,22 @@ func FindReadme(path string) string {
     return candidates[0]
 }
 
+// FindMarkdownFiles returns all markdown files in the directory.
+func FindMarkdownFiles(path string) []string {
+    entries, err := os.ReadDir(path)
+    if err != nil { return nil }
+    files := []string{}
+    for _, e := range entries {
+        if e.IsDir() { continue }
+        n := strings.ToLower(e.Name())
+        if strings.HasSuffix(n, ".md") {
+            files = append(files, e.Name())
+        }
+    }
+    sort.Strings(files)
+    return files
+}
+
 // ReadmeContent returns the full README content up to maxBytes.
 func ReadmeContent(path string, maxBytes int) (string, bool) {
     name := FindReadme(path)

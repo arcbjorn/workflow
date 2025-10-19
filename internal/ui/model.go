@@ -64,6 +64,10 @@ type Model struct {
     showTasks bool
     taskItems list.Model
     curTasks  []tasks.Task
+    // Markdown files overlay
+    showMarkdown bool
+    markdownItems list.Model
+    markdownFiles []string
     // Scan busy state
     scanning bool
 
@@ -155,6 +159,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.showTasks {
             m.taskItems.SetSize(min(60, m.width-4), min(12, m.height-6))
         }
+        if m.showMarkdown {
+            m.markdownItems.SetSize(min(60, m.width-4), min(12, m.height-6))
+        }
         // Use near full width for details to maximize readability
         if m.width > 4 { m.detail.Width = m.width - 2 } else { m.detail.Width = m.width }
         m.detail.Height = min(m.height-8, 20)
@@ -193,7 +200,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             lines[0] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render(lines[0])
         }
         for i, ln := range lines {
-            if ln == "Tasks (press r to run)" || ln == "Recent commits" || ln == "README" {
+            if ln == "Tasks (press r to run)" || ln == "Recent commits" || ln == "Docs (press d)" {
                 lines[i] = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render(ln)
             }
         }
@@ -226,22 +233,70 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.taskItems, cmd = m.taskItems.Update(msg)
             return m, cmd
         }
+        if m.showMarkdown {
+            switch msg.String() {
+            case "esc", "q":
+                m.showMarkdown = false
+                m.updateTableHeight()
+                return m, nil
+            case "enter":
+                idx := m.markdownItems.Index()
+                if idx >= 0 && idx < len(m.markdownFiles) {
+                    path := m.currentPath()
+                    if path == "" {
+                        m.showMarkdown = false
+                        return m, nil
+                    }
+                    file := m.markdownFiles[idx]
+                    filePath := filepath.Join(path, file)
+                    cmd := "if command -v bat >/dev/null 2>&1; then bat --style=plain --decorations=never --paging=always --color=always '" + filePath + "'; " +
+                        "elif command -v batcat >/dev/null 2>&1; then batcat --style=plain --decorations=never --paging=always --color=always '" + filePath + "'; " +
+                        "else less '" + filePath + "'; fi"
+                    if err := run.LaunchShellCmdNewWindow(path, cmd, m.cfg); err != nil {
+                        m.status = "markdown: " + err.Error()
+                    } else {
+                        m.status = "opened " + file
+                    }
+                    m.showMarkdown = false
+                    return m, nil
+                }
+            }
+            var cmd tea.Cmd
+            m.markdownItems, cmd = m.markdownItems.Update(msg)
+            return m, cmd
+        }
         if m.showDetail {
             switch msg.String() {
             case "q", "esc", "enter":
                 m.showDetail = false
                 m.updateTableHeight()
                 return m, nil
-            case "r":
-                p := m.currentPath()
-                if p == "" { return m, nil }
-                name := scanner.FindReadme(p)
-                if name == "" { m.status = "no README"; return m, nil }
-                file := filepath.Join(p, name)
-                cmd := "if command -v bat >/dev/null 2>&1; then bat --style=plain --decorations=never --paging=always --color=always '" + file + "'; " +
-                    "elif command -v batcat >/dev/null 2>&1; then batcat --style=plain --decorations=never --paging=always --color=always '" + file + "'; " +
-                    "else less '" + file + "'; fi"
-                if err := run.LaunchShellCmdNewWindow(p, cmd, m.cfg); err != nil { m.status = "open README: " + err.Error() } else { m.status = "opened README" }
+            case "d":
+                // Open markdown files picker from detail view
+                path := m.currentPath()
+                if path == "" { return m, nil }
+                files := scanner.FindMarkdownFiles(path)
+                if len(files) == 0 {
+                    m.status = "no markdown files"
+                    return m, nil
+                }
+                items := make([]list.Item, 0, len(files))
+                for _, file := range files {
+                    items = append(items, markdownFileItem{name: file})
+                }
+                li := list.New(items, list.NewDefaultDelegate(), 60, 12)
+                li.Title = "Open markdown file"
+                s := li.Styles
+                accHex := pickAccent(m.th.Colors, m.th.Dark)
+                fg := pickFG(m.th.Colors, m.th.Dark)
+                s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accHex))
+                s.NoItems = s.NoItems.Foreground(lipgloss.Color(fg))
+                s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fg))
+                li.Styles = s
+                m.markdownItems = li
+                m.markdownFiles = files
+                m.showMarkdown = true
+                m.showDetail = false
                 return m, nil
             case "j":
                 m.detail.ScrollDown(1)
@@ -344,17 +399,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.status = ""
             m.updateTableHeight()
             return m, loadDetailCmd(repo)
-        case "b":
-            // Open README in external terminal via bat/less
-            p := m.currentPath()
-            if p == "" { return m, nil }
-            name := scanner.FindReadme(p)
-            if name == "" { m.status = "no README"; return m, nil }
-            file := filepath.Join(p, name)
-            cmd := "if command -v bat >/dev/null 2>&1; then bat --style=plain --decorations=never --paging=always --color=always '" + file + "'; " +
-                "elif command -v batcat >/dev/null 2>&1; then batcat --style=plain --decorations=never --paging=always --color=always '" + file + "'; " +
-                "else less '" + file + "'; fi"
-            if err := run.LaunchShellCmdNewWindow(p, cmd, m.cfg); err != nil { m.status = "open README: " + err.Error() } else { m.status = "opened README" }
+        case "d":
+            // Open markdown files picker
+            path := m.currentPath()
+            if path == "" { return m, nil }
+            files := scanner.FindMarkdownFiles(path)
+            if len(files) == 0 {
+                m.status = "no markdown files"
+                return m, nil
+            }
+            items := make([]list.Item, 0, len(files))
+            for _, file := range files {
+                items = append(items, markdownFileItem{name: file})
+            }
+            li := list.New(items, list.NewDefaultDelegate(), 60, 12)
+            li.Title = "Open markdown file"
+            s := li.Styles
+            accHex := pickAccent(m.th.Colors, m.th.Dark)
+            fg := pickFG(m.th.Colors, m.th.Dark)
+            s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accHex))
+            s.NoItems = s.NoItems.Foreground(lipgloss.Color(fg))
+            s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fg))
+            li.Styles = s
+            m.markdownItems = li
+            m.markdownFiles = files
+            m.showMarkdown = true
             return m, nil
         case "/":
             m.filtering = true
@@ -531,7 +600,7 @@ func (m Model) View() string {
         fmt.Fprintln(&b, m.table.View())
     }
 
-    overlayOpen := m.showAgents || m.showTasks || m.showDetail
+    overlayOpen := m.showAgents || m.showTasks || m.showMarkdown || m.showDetail
     if !overlayOpen {
         if m.filtering {
             fmt.Fprintln(&b)
@@ -563,7 +632,7 @@ func (m Model) View() string {
     if m.showHelp && !overlayOpen {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  x expand  ? help  q quit")
-        fmt.Fprintln(&b, "Enter details  r tasks  b README (details: r)  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  y copy  u open URL  Y copy URL")
+        fmt.Fprintln(&b, "Enter details  r tasks  d docs  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  y copy  u open URL  Y copy URL")
         // badges legend
         fmt.Fprintln(&b)
         legend := fmt.Sprintf("Badges: [%s dirty] [%s conflicts] [%s ahead] [%s behind] [%s detached] [%s parent] [%s pkg]",
@@ -579,10 +648,14 @@ func (m Model) View() string {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, m.taskItems.View())
     }
+    if m.showMarkdown {
+        fmt.Fprintln(&b)
+        fmt.Fprintln(&b, m.markdownItems.View())
+    }
     if m.showDetail {
         fmt.Fprintln(&b)
         // Full-screen style details overlay (uses entire content area)
-        head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render("Details (Esc to close, r open README)")
+        head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(pickAccent(m.th.Colors, m.th.Dark))).Render("Details (Esc to close, d docs)")
         fmt.Fprintln(&b, head)
         fmt.Fprintln(&b, m.detail.View())
     }
@@ -852,6 +925,14 @@ func (t taskItem) Title() string { return t.Task.Name }
 func (t taskItem) Description() string { return t.Task.Cmd }
 func (t taskItem) FilterValue() string { return t.Task.Name + " " + t.Task.Cmd }
 
+type markdownFileItem struct {
+    name string
+}
+
+func (m markdownFileItem) Title() string { return m.name }
+func (m markdownFileItem) Description() string { return "view with bat" }
+func (m markdownFileItem) FilterValue() string { return m.name }
+
 func (m *Model) agentItems() []list.Item {
     items := []list.Item{}
     // stable order: default first, then alphabetical others
@@ -1033,9 +1114,9 @@ func buildDetailPlainText(r scanner.RepoEntry) string {
             fmt.Fprintln(&sb, c)
         }
     }
-    // README snippet
+    // Docs section - shows README snippet for quick preview, press d for full markdown picker
     fmt.Fprintln(&sb)
-    fmt.Fprintln(&sb, "README")
+    fmt.Fprintln(&sb, "Docs (press d)")
     readme := scanner.ReadmeSnippet(r.Path, 24)
     if len(readme) == 0 {
         fmt.Fprintln(&sb, "(none)")
@@ -1056,7 +1137,7 @@ func (m *Model) renderDetailNow(r scanner.RepoEntry) {
 
 // updateTableHeight computes table height so the overall view fits in the window.
 func (m *Model) updateTableHeight() {
-    overlayOpen := m.showAgents || m.showTasks || m.showDetail
+    overlayOpen := m.showAgents || m.showTasks || m.showMarkdown || m.showDetail
     overhead := 0
     // Title + separator always
     overhead += 2
@@ -1083,6 +1164,14 @@ func (m *Model) updateTableHeight() {
     }
     if m.showTasks {
         ov := m.taskItems.Height()
+        if ov <= 0 { ov = 12 }
+        tableH := contentH - (1 + ov)
+        if tableH < 3 { tableH = 3 }
+        m.table.SetHeight(tableH)
+        return
+    }
+    if m.showMarkdown {
+        ov := m.markdownItems.Height()
         if ov <= 0 { ov = 12 }
         tableH := contentH - (1 + ov)
         if tableH < 3 { tableH = 3 }
