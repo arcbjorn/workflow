@@ -583,7 +583,9 @@ func (m Model) View() string {
         // badges legend
         fmt.Fprintln(&b)
         legend := fmt.Sprintf("Badges: [%s dirty] [%s conflicts] [%s ahead] [%s behind] [%s detached] [%s parent] [%s pkg]",
-            "*", "‼", "⇡", "⇣", "det", "mono", "pkg",
+            colorBadge("*", m.th, "red"), colorBadge("‼", m.th, "red"), colorBadge("⇡", m.th, "green"),
+            colorBadge("⇣", m.th, "yellow"), colorBadge("det", m.th, "magenta"), colorBadge("mono", m.th, "blue"),
+            colorBadge("pkg", m.th, "cyan"),
         )
         fmt.Fprintln(&b, legend)
     }
