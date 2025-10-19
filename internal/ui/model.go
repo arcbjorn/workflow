@@ -577,7 +577,7 @@ func (m Model) View() string {
     if m.showHelp && !overlayOpen {
         fmt.Fprintln(&b)
         fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  m group  x expand  ? help  q quit")
-        fmt.Fprintln(&b, "Enter details  r tasks (list)  r README (details)  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  y copy  u open URL  Y copy URL")
+        fmt.Fprintln(&b, "Enter details  r tasks  b README (details: r)  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  y copy  u open URL  Y copy URL")
         // badges legend
         fmt.Fprintln(&b)
         legend := fmt.Sprintf("Badges: [%s dirty] [%s conflicts] [%s ahead] [%s behind] [%s detached] [%s parent] [%s pkg]",
