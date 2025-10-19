@@ -107,9 +107,10 @@ func NewModel(cfg config.Config, th theme.Theme) Model {
         showAgents:  false,
         sortKey:     "last",
         sortAsc:     false,
-        grouped:     false,
+        grouped:     true,
         expanded:    map[string]bool{},
     }
+    // Initialize monorepo parents expanded (grouped view is default)
     // Spinner init
     sp := spinner.New()
     sp.Spinner = spinner.MiniDot
@@ -311,21 +312,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         case "?":
             m.showHelp = !m.showHelp
             return m, nil
-        case "m":
-            // Toggle grouped view
-            m.grouped = !m.grouped
-            if m.grouped {
-                // Initialize all parents expanded by default
-                for _, r := range m.repos {
-                    if r.Monorepo {
-                        if _, ok := m.expanded[r.Path]; !ok { m.expanded[r.Path] = true }
-                    }
-                }
-            }
-            m.refreshRows()
-            m.status = map[bool]string{true:"grouped view", false:"flat view"}[m.grouped]
-            return m, nil
-        case "x":
+          case "x":
             // Expand/collapse parent group
             if len(m.visible) == 0 { return m, nil }
             idx := m.table.Cursor()
@@ -525,8 +512,7 @@ func (m Model) View() string {
     if m.filter != "" {
         title += fmt.Sprintf("  [/%s]", m.filter)
     }
-    // indicators
-    if m.grouped { title += "  [grouped]" }
+    // grouped view is now default, no indicator needed
     title += fmt.Sprintf("  [sort:%s%s]", m.sortKey, map[bool]string{true:"↑", false:"↓"}[m.sortAsc])
     if m.scanning {
         fmt.Fprintln(&b, titleStyle.Render(m.spin.View()+" "+title))
@@ -576,7 +562,7 @@ func (m Model) View() string {
 
     if m.showHelp && !overlayOpen {
         fmt.Fprintln(&b)
-        fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  m group  x expand  ? help  q quit")
+        fmt.Fprintln(&b, "j/k move  g/G home/end  / filter  R refresh  s/S sort  x expand  ? help  q quit")
         fmt.Fprintln(&b, "Enter details  r tasks  b README (details: r)  e nvim  E GUI editor  o new shell  l lazygit  f fetch  a/A agents  y copy  u open URL  Y copy URL")
         // badges legend
         fmt.Fprintln(&b)
@@ -707,61 +693,47 @@ func (m *Model) refreshRows() {
     m.visible = m.visible[:0]
     sel := m.table.Cursor()
     rowNo := 0
-    if !m.grouped {
-        for i, r := range m.repos {
-            // per-repo hide override
-            if m.isHidden(r.Path) { continue }
-            if m.filter != "" {
-                q := strings.ToLower(m.filter)
-                if !strings.Contains(strings.ToLower(r.Name), q) && !strings.Contains(strings.ToLower(r.Branch), q) {
-                    continue
-                }
-            }
-            dirty := ""
-            isSel := rowNo == sel
-            if r.Dirty { dirty = "*" }
-            ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
-            state := bucket(r.LastAge)
-            name := m.renderNameSelected(r, "", isSel)
-            rows = append(rows, table.Row{name, state, r.Branch, dirty, ab, r.LastAge})
-            m.visible = append(m.visible, i)
-            rowNo++
+    // Grouped view is now default - always use grouped logic
+    // Build child index and set for quick lookup
+    childrenOf := map[string][]int{}
+    childSet := map[int]bool{}
+    for i, r := range m.repos {
+        if r.WorkspacePkg && r.ParentPath != "" {
+            childrenOf[r.ParentPath] = append(childrenOf[r.ParentPath], i)
+            childSet[i] = true
         }
-    } else {
-        // Build child index and set for quick lookup
-        childrenOf := map[string][]int{}
-        childSet := map[int]bool{}
-        for i, r := range m.repos {
-            if r.WorkspacePkg && r.ParentPath != "" {
-                childrenOf[r.ParentPath] = append(childrenOf[r.ParentPath], i)
-                childSet[i] = true
+    }
+    // helper to maybe render a row
+    addRow := func(i int, r scanner.RepoEntry, indent string) {
+        if m.filter != "" {
+            q := strings.ToLower(m.filter)
+            n := r.Name
+            if r.WorkspacePkg && r.PackageName != "" { n = r.PackageName }
+            if !strings.Contains(strings.ToLower(n), q) && !strings.Contains(strings.ToLower(r.Branch), q) {
+                return
             }
         }
-        // helper to maybe render a row
-        addRow := func(i int, r scanner.RepoEntry, indent string) {
-            if m.filter != "" {
-                q := strings.ToLower(m.filter)
-                n := r.Name
-                if r.WorkspacePkg && r.PackageName != "" { n = r.PackageName }
-                if !strings.Contains(strings.ToLower(n), q) && !strings.Contains(strings.ToLower(r.Branch), q) {
-                    return
-                }
+        dirty := ""
+        isSel := rowNo == sel
+        if r.Dirty { dirty = "*" }
+        ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
+        state := bucket(r.LastAge)
+        name := m.renderNameSelected(r, indent, isSel)
+        rows = append(rows, table.Row{name, state, r.Branch, dirty, ab, r.LastAge})
+        m.visible = append(m.visible, i)
+        rowNo++
+    }
+    for i, r := range m.repos {
+        if m.isHidden(r.Path) { continue }
+        if r.WorkspacePkg { continue } // will be rendered under parent
+        addRow(i, r, "")
+        // Ensure monorepo parents are expanded by default
+        if r.Monorepo {
+            if _, ok := m.expanded[r.Path]; !ok {
+                m.expanded[r.Path] = true
             }
-            dirty := ""
-            isSel := rowNo == sel
-            if r.Dirty { dirty = "*" }
-            ab := fmt.Sprintf("%d/%d", r.Ahead, r.Behind)
-            state := bucket(r.LastAge)
-            name := m.renderNameSelected(r, indent, isSel)
-            rows = append(rows, table.Row{name, state, r.Branch, dirty, ab, r.LastAge})
-            m.visible = append(m.visible, i)
-            rowNo++
         }
-        for i, r := range m.repos {
-            if m.isHidden(r.Path) { continue }
-            if r.WorkspacePkg { continue } // will be rendered under parent
-            addRow(i, r, "")
-            if r.Monorepo && m.expanded[r.Path] {
+        if r.Monorepo && m.expanded[r.Path] {
                 // sort children by name
                 ch := childrenOf[r.Path]
                 sort.SliceStable(ch, func(a, b int) bool {
@@ -771,10 +743,9 @@ func (m *Model) refreshRows() {
                     if m.repos[ch[b]].PackageName != "" { nb = m.repos[ch[b]].PackageName }
                     return na < nb
                 })
-                for _, ci := range ch {
-                    if m.isHidden(m.repos[ci].Path) { continue }
-                    addRow(ci, m.repos[ci], "  ")
-                }
+            for _, ci := range ch {
+                if m.isHidden(m.repos[ci].Path) { continue }
+                addRow(ci, m.repos[ci], "  ")
             }
         }
     }
