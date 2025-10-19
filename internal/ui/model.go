@@ -273,29 +273,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 return m, nil
             case "d":
                 // Open markdown files picker from detail view
-                path := m.currentPath()
-                if path == "" { return m, nil }
-                files := scanner.FindMarkdownFiles(path)
-                if len(files) == 0 {
-                    m.status = "no markdown files"
-                    return m, nil
-                }
-                items := make([]list.Item, 0, len(files))
-                for _, file := range files {
-                    items = append(items, markdownFileItem{name: file})
-                }
-                li := list.New(items, list.NewDefaultDelegate(), 60, 12)
-                li.Title = "Open markdown file"
-                s := li.Styles
-                accHex := pickAccent(m.th.Colors, m.th.Dark)
-                fg := pickFG(m.th.Colors, m.th.Dark)
-                s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accHex))
-                s.NoItems = s.NoItems.Foreground(lipgloss.Color(fg))
-                s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fg))
-                li.Styles = s
-                m.markdownItems = li
-                m.markdownFiles = files
-                m.showMarkdown = true
+                m.openMarkdownPicker()
                 m.showDetail = false
                 return m, nil
             case "j":
@@ -401,29 +379,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             return m, loadDetailCmd(repo)
         case "d":
             // Open markdown files picker
-            path := m.currentPath()
-            if path == "" { return m, nil }
-            files := scanner.FindMarkdownFiles(path)
-            if len(files) == 0 {
-                m.status = "no markdown files"
-                return m, nil
-            }
-            items := make([]list.Item, 0, len(files))
-            for _, file := range files {
-                items = append(items, markdownFileItem{name: file})
-            }
-            li := list.New(items, list.NewDefaultDelegate(), 60, 12)
-            li.Title = "Open markdown file"
-            s := li.Styles
-            accHex := pickAccent(m.th.Colors, m.th.Dark)
-            fg := pickFG(m.th.Colors, m.th.Dark)
-            s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accHex))
-            s.NoItems = s.NoItems.Foreground(lipgloss.Color(fg))
-            s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fg))
-            li.Styles = s
-            m.markdownItems = li
-            m.markdownFiles = files
-            m.showMarkdown = true
+            m.openMarkdownPicker()
             return m, nil
         case "/":
             m.filtering = true
@@ -449,16 +405,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.status = "no tasks detected"
                 return m, nil
             }
-            li := list.New(items, list.NewDefaultDelegate(), 60, 12)
-            li.Title = "Run task"
-            s := li.Styles
-            accHex := pickAccent(m.th.Colors, m.th.Dark)
-            fg := pickFG(m.th.Colors, m.th.Dark)
-            s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accHex))
-            s.NoItems = s.NoItems.Foreground(lipgloss.Color(fg))
-            s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fg))
-            li.Styles = s
-            m.taskItems = li
+            m.taskItems = m.setupThemedList(items, "Run task")
             m.showTasks = true
             return m, nil
         case "s":
@@ -933,6 +880,67 @@ func (m markdownFileItem) Title() string { return m.name }
 func (m markdownFileItem) Description() string { return "view with bat" }
 func (m markdownFileItem) FilterValue() string { return m.name }
 
+// setupThemedList creates a list with current theme styling
+func (m *Model) setupThemedList(items []list.Item, title string) list.Model {
+    d := list.NewDefaultDelegate()
+    fg := pickFG(m.th.Colors, m.th.Dark)
+    accentHex := pickAccent(m.th.Colors, m.th.Dark)
+    d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(lipgloss.Color(fg))
+    d.Styles.NormalDesc = d.Styles.NormalDesc.Foreground(lipgloss.Color(fg))
+    selText := bestTextFor(accentHex, fg, pickBG(m.th.Colors, m.th.Dark))
+    d.Styles.SelectedTitle = d.Styles.SelectedTitle.
+        Foreground(lipgloss.Color(selText)).
+        Background(lipgloss.Color(accentHex)).
+        BorderForeground(lipgloss.Color(accentHex))
+    d.Styles.SelectedDesc = d.Styles.SelectedDesc.
+        Foreground(lipgloss.Color(selText)).
+        Background(lipgloss.Color(accentHex))
+
+    li := list.New(items, d, 60, 12)
+    li.Title = title
+    li.SetShowStatusBar(false)
+    li.SetFilteringEnabled(false)
+    s := li.Styles
+    s.TitleBar = lipgloss.NewStyle()
+    s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
+    s.Spinner = s.Spinner.Foreground(lipgloss.Color(accentHex))
+    s.FilterCursor = s.FilterCursor.Foreground(lipgloss.Color(accentHex))
+    s.FilterPrompt = s.FilterPrompt.Foreground(lipgloss.Color(accentHex))
+    s.DefaultFilterCharacterMatch = s.DefaultFilterCharacterMatch.Foreground(lipgloss.Color(accentHex))
+    s.StatusBar = s.StatusBar.Foreground(lipgloss.Color(fg))
+    s.StatusEmpty = s.StatusEmpty.Foreground(lipgloss.Color(fg))
+    s.StatusBarActiveFilter = s.StatusBarActiveFilter.Foreground(lipgloss.Color(accentHex))
+    s.StatusBarFilterCount = s.StatusBarFilterCount.Foreground(lipgloss.Color(fg))
+    s.NoItems = s.NoItems.Foreground(lipgloss.Color(fg))
+    s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fg))
+    s.ActivePaginationDot = s.ActivePaginationDot.Foreground(lipgloss.Color(accentHex))
+    inactive := m.th.Colors.Normal["black"]
+    if inactive == "" { inactive = fg }
+    s.InactivePaginationDot = s.InactivePaginationDot.Foreground(lipgloss.Color(inactive))
+    s.ArabicPagination = s.ArabicPagination.Foreground(lipgloss.Color(inactive))
+    s.DividerDot = s.DividerDot.Foreground(lipgloss.Color(inactive))
+    li.Styles = s
+    return li
+}
+
+// openMarkdownPicker shows the markdown file picker for the current path
+func (m *Model) openMarkdownPicker() {
+    path := m.currentPath()
+    if path == "" { return }
+    files := scanner.FindMarkdownFiles(path)
+    if len(files) == 0 {
+        m.status = "no markdown files"
+        return
+    }
+    items := make([]list.Item, 0, len(files))
+    for _, file := range files {
+        items = append(items, markdownFileItem{name: file})
+    }
+    m.markdownItems = m.setupThemedList(items, "Open markdown file")
+    m.markdownFiles = files
+    m.showMarkdown = true
+}
+
 func (m *Model) agentItems() []list.Item {
     items := []list.Item{}
     // stable order: default first, then alphabetical others
@@ -1000,45 +1008,7 @@ func (m *Model) applyThemeToUI() {
 }
 
 func (m *Model) setupAgentsList() {
-    items := m.agentItems()
-    d := list.NewDefaultDelegate()
-    fgList := pickFG(m.th.Colors, m.th.Dark)
-    accentHex := pickAccent(m.th.Colors, m.th.Dark)
-    d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(lipgloss.Color(fgList))
-    d.Styles.NormalDesc = d.Styles.NormalDesc.Foreground(lipgloss.Color(fgList))
-    lstSelText := bestTextFor(accentHex, fgList, pickBG(m.th.Colors, m.th.Dark))
-    d.Styles.SelectedTitle = d.Styles.SelectedTitle.
-        Foreground(lipgloss.Color(lstSelText)).
-        Background(lipgloss.Color(accentHex)).
-        BorderForeground(lipgloss.Color(accentHex))
-    d.Styles.SelectedDesc = d.Styles.SelectedDesc.
-        Foreground(lipgloss.Color(lstSelText)).
-        Background(lipgloss.Color(accentHex))
-    lst := list.New(items, d, 40, 10)
-    lst.Title = "Choose agent"
-    lst.SetShowStatusBar(false)
-    lst.SetFilteringEnabled(false)
-    s := lst.Styles
-    s.TitleBar = lipgloss.NewStyle()
-    s.Title = lipgloss.NewStyle().Foreground(lipgloss.Color(accentHex))
-    s.Spinner = s.Spinner.Foreground(lipgloss.Color(accentHex))
-    s.FilterCursor = s.FilterCursor.Foreground(lipgloss.Color(accentHex))
-    s.FilterPrompt = s.FilterPrompt.Foreground(lipgloss.Color(accentHex))
-    s.DefaultFilterCharacterMatch = s.DefaultFilterCharacterMatch.Foreground(lipgloss.Color(accentHex))
-    s.StatusBar = s.StatusBar.Foreground(lipgloss.Color(fgList))
-    s.StatusEmpty = s.StatusEmpty.Foreground(lipgloss.Color(fgList))
-    s.StatusBarActiveFilter = s.StatusBarActiveFilter.Foreground(lipgloss.Color(accentHex))
-    s.StatusBarFilterCount = s.StatusBarFilterCount.Foreground(lipgloss.Color(fgList))
-    s.NoItems = s.NoItems.Foreground(lipgloss.Color(fgList))
-    s.HelpStyle = s.HelpStyle.Foreground(lipgloss.Color(fgList))
-    s.ActivePaginationDot = s.ActivePaginationDot.Foreground(lipgloss.Color(accentHex))
-    inactive := m.th.Colors.Normal["black"]
-    if inactive == "" { inactive = fgList }
-    s.InactivePaginationDot = s.InactivePaginationDot.Foreground(lipgloss.Color(inactive))
-    s.ArabicPagination = s.ArabicPagination.Foreground(lipgloss.Color(inactive))
-    s.DividerDot = s.DividerDot.Foreground(lipgloss.Color(inactive))
-    lst.Styles = s
-    m.agents = lst
+    m.agents = m.setupThemedList(m.agentItems(), "Choose agent")
 }
 
 func (m *Model) updateTableHeader() {

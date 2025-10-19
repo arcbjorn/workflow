@@ -70,15 +70,6 @@ func FindMarkdownFiles(path string) []string {
     return files
 }
 
-// ReadmeContent returns the full README content up to maxBytes.
-func ReadmeContent(path string, maxBytes int) (string, bool) {
-    name := FindReadme(path)
-    if name == "" { return "", false }
-    b, err := os.ReadFile(filepath.Join(path, name))
-    if err != nil { return "", false }
-    if maxBytes > 0 && len(b) > maxBytes { b = b[:maxBytes] }
-    return string(b), true
-}
 
 func splitNonEmpty(s string) []string {
     var out []string
